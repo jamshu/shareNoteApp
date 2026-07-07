@@ -84,14 +84,31 @@ export async function POST({ request, cookies }) {
 				// Hard-scope to the user's own tenant so a loose/misconfigured record
 				// rule can never leak another company's rows into the app.
 				const scope = companyId
-					? ['x_studio_company_id', '=', companyId]
-					: ['create_uid', '=', uid];
+					? [['x_studio_company_id', '=', companyId]]
+					: [['create_uid', '=', uid]];
+				// Visibility hard-scope: notes/comments are private to owner +
+				// followers + group members even if the Odoo record rules are loose.
+				if (modelKey === 'notes') {
+					scope.push(
+						'|', '|',
+						['create_uid', '=', uid],
+						['x_studio_follower_ids', 'in', [uid]],
+						['x_studio_group_ids.x_studio_member_ids', 'in', [uid]]
+					);
+				} else if (modelKey === 'comments') {
+					scope.push(
+						'|', '|',
+						['x_studio_note_id.create_uid', '=', uid],
+						['x_studio_note_id.x_studio_follower_ids', 'in', [uid]],
+						['x_studio_note_id.x_studio_group_ids.x_studio_member_ids', 'in', [uid]]
+					);
+				}
 				const kwargs = { fields };
 				if (order) kwargs.order = order;
 				if (limit) kwargs.limit = limit;
 				return json({
 					success: true,
-					results: await call(MODEL, 'search_read', [[scope, ...domain]], kwargs)
+					results: await call(MODEL, 'search_read', [[...scope, ...domain]], kwargs)
 				});
 			}
 
