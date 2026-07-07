@@ -1,0 +1,25 @@
+- generic [ref=e4]:
+  - heading "📝 ShareNote" [level=1] [ref=e5]
+  - paragraph [ref=e6]: Create your account.
+  - generic [ref=e7]:
+    - generic [ref=e8]: Your name
+    - textbox "Your name" [ref=e9]
+    - generic [ref=e10]: Email
+    - textbox "Email" [ref=e11]
+    - generic [ref=e12]: Password
+    - textbox "Password" [ref=e13]
+    - generic [ref=e14]: Organization
+    - generic [ref=e15]:
+      - generic [ref=e16] [cursor=pointer]:
+        - radio "Organization Create new" [checked] [ref=e17]
+        - text: Create new
+      - generic [ref=e18] [cursor=pointer]:
+        - radio "Join existing" [ref=e19]
+        - text: Join existing
+    - textbox "Organization name" [ref=e20]
+    - paragraph [ref=e21]: You'll be the organization admin.
+    - button "Sign up" [ref=e22] [cursor=pointer]
+    - paragraph [ref=e23]:
+      - text: Have an account?
+      - link "Sign in" [ref=e24] [cursor=pointer]:
+        - /url: /login
