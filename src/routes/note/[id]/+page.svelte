@@ -5,6 +5,7 @@
 	import { base } from '$app/paths';
 	import { user } from '$lib/auth.js';
 	import { odooClient } from '$lib/odoo.js';
+	import ConfirmButton from '$lib/components/ConfirmButton.svelte';
 
 	const noteId = Number($page.params.id);
 
@@ -26,6 +27,9 @@
 	let commentText = $state('');
 	let commentFiles = $state(null);
 	let commenting = $state(false);
+	let editingId = $state(null);
+	let editText = $state('');
+	let savingEdit = $state(false);
 
 	let isOwner = $derived(note?.create_uid?.[0] === $user?.uid);
 	let canEdit = $derived(isOwner || note?.x_studio_permission === 'contribute');
@@ -119,6 +123,17 @@
 
 	const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+	// inverse of the composer encoding: <p>…<br/>…</p> back to plain text
+	const htmlToText = (h) =>
+		String(h || '')
+			.replace(/<br\s*\/?>/gi, '\n')
+			.replace(/<\/p>\s*<p>/gi, '\n\n')
+			.replace(/<[^>]*>/g, '')
+			.replace(/&lt;/g, '<')
+			.replace(/&gt;/g, '>')
+			.replace(/&amp;/g, '&')
+			.trim();
+
 	async function addComment(e) {
 		e.preventDefault();
 		if (!commentText.trim() && !commentFiles?.length) return;
@@ -160,12 +175,45 @@
 	}
 
 	async function deleteNote() {
-		if (!confirm('Delete this note and its comments?')) return;
 		try {
 			await odooClient.deleteRecord(noteId);
 			goto(`${base}/`);
 		} catch (e) {
 			error = e.message;
+		}
+	}
+
+	async function deleteComment(id) {
+		error = '';
+		try {
+			await odooClient.deleteRecord(id, 'comments');
+			if (editingId === id) editingId = null;
+			await loadComments();
+		} catch (e) {
+			error = e.message;
+		}
+	}
+
+	function startEdit(c) {
+		editingId = c.id;
+		editText = htmlToText(c.x_studio_body);
+	}
+
+	async function saveEdit() {
+		const text = editText.trim();
+		if (!text || savingEdit) return;
+		savingEdit = true;
+		error = '';
+		try {
+			const body = `<p>${esc(text).replace(/\n/g, '<br/>')}</p>`;
+			await odooClient.updateRecord(editingId, { x_studio_body: body }, 'comments');
+			editingId = null;
+			editText = '';
+			await loadComments();
+		} catch (e) {
+			error = e.message;
+		} finally {
+			savingEdit = false;
 		}
 	}
 
@@ -224,7 +272,7 @@
 			<button class="btn btn--sm" onclick={() => (shareOpen = !shareOpen)}>
 				Share ({followerIds.length + groupIds.length})
 			</button>
-			<button class="btn btn--sm btn--danger" onclick={deleteNote}>Delete</button>
+			<ConfirmButton onconfirm={deleteNote} />
 		{:else}
 			<span class="chip">{note.create_uid?.[1]}</span>
 			<span class="chip {note.x_studio_permission === 'contribute' ? 'chip--green' : ''}">
@@ -326,9 +374,34 @@
 			<div class="comment-head">
 				<strong>{c.create_uid?.[1]}</strong>
 				<span class="muted">{fmtWhen(c.create_date)}</span>
+				{#if c.create_uid?.[0] === $user?.uid}
+					<div class="comment-actions">
+						{#if editingId === c.id}
+							<button class="btn btn--sm btn--ghost" onclick={() => (editingId = null)}>
+								Cancel
+							</button>
+						{:else}
+							<button class="btn btn--sm btn--ghost" onclick={() => startEdit(c)}>Edit</button>
+							<ConfirmButton onconfirm={() => deleteComment(c.id)} />
+						{/if}
+					</div>
+				{/if}
 			</div>
-			<!-- eslint-disable-next-line svelte/no-at-html-tags — comment bodies are escaped at write time -->
-			<div class="comment-body">{@html c.x_studio_body || ''}</div>
+			{#if editingId === c.id}
+				<textarea class="input" rows="3" bind:value={editText}></textarea>
+				<div class="edit-row">
+					<button
+						class="btn btn--primary btn--sm"
+						disabled={savingEdit || !editText.trim()}
+						onclick={saveEdit}
+					>
+						{savingEdit ? 'Saving…' : 'Save'}
+					</button>
+				</div>
+			{:else}
+				<!-- eslint-disable-next-line svelte/no-at-html-tags — comment bodies are escaped at write time -->
+				<div class="comment-body">{@html c.x_studio_body || ''}</div>
+			{/if}
 			{#if commentAtts(c.id).length}
 				<div class="atts">
 					{#each commentAtts(c.id) as a (a.id)}
@@ -488,10 +561,21 @@
 	}
 	.comment-head {
 		display: flex;
-		gap: 10px;
-		align-items: baseline;
+		flex-wrap: wrap;
+		gap: 6px 10px;
+		align-items: center;
 		font-size: 0.88rem;
 		margin-bottom: 6px;
+	}
+	.comment-actions {
+		display: flex;
+		gap: 6px;
+		margin-left: auto;
+	}
+	.edit-row {
+		display: flex;
+		justify-content: flex-end;
+		margin-top: 8px;
 	}
 	.comment-body :global(p) {
 		margin: 0 0 6px;
@@ -511,13 +595,21 @@
 	}
 	.composer-row {
 		display: flex;
+		flex-wrap: wrap;
 		justify-content: space-between;
 		align-items: center;
 		gap: 10px;
 		margin-top: 10px;
 	}
 	.composer-row input[type='file'] {
+		flex: 1 1 160px;
+		min-width: 0;
+		max-width: 100%;
 		font-size: 0.82rem;
 		color: var(--text-dim);
+	}
+	.composer-row .btn {
+		flex-shrink: 0;
+		margin-left: auto;
 	}
 </style>

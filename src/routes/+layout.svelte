@@ -18,6 +18,24 @@
 	const PUBLIC_ROUTES = ['/login', '/signup'];
 	const isPublic = (path) => PUBLIC_ROUTES.some((p) => path.startsWith(`${base}${p}`));
 
+	// Keepalive: while logged in, re-sync the session every 10 min and whenever the
+	// tab becomes visible. Each /api/auth/me call refreshes the rotated session id
+	// and slides the cookie's 30-day expiry, so an idle tab never drifts into logout.
+	const KEEPALIVE_MS = 10 * 60 * 1000;
+
+	function pingIfVisible() {
+		if ($user && document.visibilityState === 'visible') checkSession();
+	}
+
+	onMount(() => {
+		document.addEventListener('visibilitychange', pingIfVisible);
+		const keepaliveTimer = setInterval(pingIfVisible, KEEPALIVE_MS);
+		return () => {
+			clearInterval(keepaliveTimer);
+			document.removeEventListener('visibilitychange', pingIfVisible);
+		};
+	});
+
 	onMount(async () => {
 		applyTheme(coerceTheme(localStorage.getItem('theme')));
 		await checkSession();

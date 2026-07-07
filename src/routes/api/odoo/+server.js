@@ -115,6 +115,18 @@ export async function POST({ request, cookies }) {
 			case 'update': {
 				const { id, values } = data;
 
+				// comments may only be edited by their author (record rules alone
+				// don't guarantee this, so enforce it here)
+				if (modelKey === 'comments') {
+					const [rec] = await call(MODEL, 'read', [[Number(id)]], { fields: ['create_uid'] });
+					if (rec?.create_uid?.[0] !== uid) {
+						return json({ success: false, error: 'Not your comment' }, { status: 403 });
+					}
+					if (values.x_studio_body) {
+						values.x_name = stripHtml(values.x_studio_body).slice(0, 60) || 'Comment';
+					}
+				}
+
 				// diff followers before/after so only NEWLY shared users get pushed
 				let before = null;
 				if (
@@ -140,6 +152,20 @@ export async function POST({ request, cookies }) {
 
 			case 'delete': {
 				const { id } = data;
+				// only the author may delete a comment, only the owner may delete a note
+				if (modelKey === 'comments' || modelKey === 'notes') {
+					const [rec] = await call(MODEL, 'read', [[Number(id)]], { fields: ['create_uid'] });
+					if (rec?.create_uid?.[0] !== uid) {
+						return json(
+							{
+								success: false,
+								error:
+									modelKey === 'comments' ? 'Not your comment' : 'Only the owner can delete a note'
+							},
+							{ status: 403 }
+						);
+					}
+				}
 				return json({ success: true, result: await call(MODEL, 'unlink', [[Number(id)]]) });
 			}
 
