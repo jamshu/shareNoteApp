@@ -171,6 +171,44 @@
 
 	const fmtWhen = (d) => (d ? new Date(d + 'Z').toLocaleString() : '');
 	const commentAtts = (cid) => attachments.filter((a) => a.commentId === cid);
+
+	/* ── rich text toolbar ───────────────────────────────────────────── */
+	// ponytail: execCommand is deprecated but universally supported and dependency-free;
+	// swap for Tiptap if it ever breaks.
+	function exec(cmd, value = null) {
+		bodyEl?.focus();
+		document.execCommand(cmd, false, value);
+		scheduleSave({ x_studio_notes: bodyEl.innerHTML });
+	}
+
+	function addLink() {
+		const url = prompt('Link URL (https://…)');
+		if (url) exec('createLink', url);
+	}
+
+	const TOOLBAR = [
+		{ cmd: 'bold', label: 'B', title: 'Bold', style: 'font-weight:700' },
+		{ cmd: 'italic', label: 'I', title: 'Italic', style: 'font-style:italic' },
+		{ cmd: 'underline', label: 'U', title: 'Underline', style: 'text-decoration:underline' },
+		{ cmd: 'strikeThrough', label: 'S', title: 'Strikethrough', style: 'text-decoration:line-through' },
+		{ sep: true },
+		{ cmd: 'formatBlock', value: '<h1>', label: 'H1', title: 'Heading 1' },
+		{ cmd: 'formatBlock', value: '<h2>', label: 'H2', title: 'Heading 2' },
+		{ cmd: 'formatBlock', value: '<h3>', label: 'H3', title: 'Heading 3' },
+		{ cmd: 'formatBlock', value: '<p>', label: '¶', title: 'Paragraph' },
+		{ sep: true },
+		{ cmd: 'insertUnorderedList', label: '•', title: 'Bullet list' },
+		{ cmd: 'insertOrderedList', label: '1.', title: 'Numbered list' },
+		{ cmd: 'formatBlock', value: '<blockquote>', label: '❝', title: 'Quote' },
+		{ cmd: 'formatBlock', value: '<pre>', label: '</>', title: 'Code block' },
+		{ sep: true },
+		{ cmd: 'justifyLeft', label: '⇤', title: 'Align left' },
+		{ cmd: 'justifyCenter', label: '↔', title: 'Align center' },
+		{ cmd: 'justifyRight', label: '⇥', title: 'Align right' },
+		{ sep: true },
+		{ link: true, label: '🔗', title: 'Insert link' },
+		{ cmd: 'removeFormat', label: '✕', title: 'Clear formatting' }
+	];
 </script>
 
 {#if error && !note}
@@ -250,6 +288,30 @@
 		onchange={(e) => scheduleSave({ x_studio_date: e.target.value || false })}
 	/>
 
+	{#if canEdit}
+		<div class="toolbar card">
+			{#each TOOLBAR as t, i (i)}
+				{#if t.sep}
+					<span class="tb-sep"></span>
+				{:else}
+					<button
+						class="tb-btn"
+						title={t.title}
+						style={t.style || ''}
+						onmousedown={(e) => e.preventDefault()}
+						onclick={() => (t.link ? addLink() : exec(t.cmd, t.value))}
+					>{t.label}</button>
+				{/if}
+			{/each}
+			<span class="tb-sep"></span>
+			<label class="tb-color" title="Text color">
+				A<input type="color" onchange={(e) => exec('foreColor', e.target.value)} />
+			</label>
+			<label class="tb-color" title="Highlight">
+				🖊<input type="color" value="#fff59d" onchange={(e) => exec('hiliteColor', e.target.value)} />
+			</label>
+		</div>
+	{/if}
 	<div
 		class="richtext"
 		bind:this={bodyEl}
@@ -337,6 +399,88 @@
 	.date-input {
 		width: auto;
 		margin: 4px 0 14px;
+	}
+	.toolbar {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 2px;
+		padding: 6px 8px;
+		margin-bottom: 8px;
+		position: sticky;
+		top: 8px;
+		z-index: 5;
+	}
+	.tb-btn {
+		min-width: 32px;
+		height: 30px;
+		padding: 0 7px;
+		border-radius: 8px;
+		font-size: 0.88rem;
+		color: var(--text-dim);
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+	}
+	.tb-btn:hover {
+		background: var(--surface-2);
+		color: var(--text);
+	}
+	.tb-sep {
+		width: 1px;
+		height: 20px;
+		background: var(--border);
+		margin: 0 5px;
+	}
+	.tb-color {
+		position: relative;
+		min-width: 32px;
+		height: 30px;
+		border-radius: 8px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 0.88rem;
+		color: var(--text-dim);
+		cursor: pointer;
+	}
+	.tb-color:hover {
+		background: var(--surface-2);
+		color: var(--text);
+	}
+	.tb-color input[type='color'] {
+		position: absolute;
+		inset: 0;
+		opacity: 0;
+		cursor: pointer;
+	}
+	/* rendered note content */
+	.richtext :global(h1),
+	.richtext :global(h2),
+	.richtext :global(h3) {
+		margin: 0.6em 0 0.3em;
+	}
+	.richtext :global(ul),
+	.richtext :global(ol) {
+		padding-left: 1.4em;
+		margin: 0.4em 0;
+	}
+	.richtext :global(blockquote) {
+		margin: 0.6em 0;
+		padding: 4px 14px;
+		border-left: 3px solid var(--accent);
+		color: var(--text-dim);
+	}
+	.richtext :global(pre) {
+		background: var(--surface-2);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		padding: 10px 12px;
+		overflow-x: auto;
+		font-size: 0.88rem;
+	}
+	.richtext :global(a) {
+		color: var(--accent);
 	}
 	.comment {
 		padding: 14px 16px;
