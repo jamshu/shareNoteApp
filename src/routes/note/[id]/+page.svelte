@@ -25,6 +25,40 @@
 	let comments = $state([]);
 	let attachments = $state([]); // flat list, joined by commentId
 	let viewerAtt = $state(null); // attachment open in the in-app viewer overlay
+	let pdfBox = $state(null); // container for pdf.js page canvases
+
+	$effect(() => {
+		if (pdfBox && viewerAtt?.mimetype === 'application/pdf') renderPdf(viewerAtt.id, pdfBox);
+	});
+
+	async function renderPdf(attId, el) {
+		try {
+			const pdfjs = await import('pdfjs-dist');
+			pdfjs.GlobalWorkerOptions.workerSrc = (
+				await import('pdfjs-dist/build/pdf.worker.min.mjs?url')
+			).default;
+			// fetch ourselves so the session cookie is sent
+			const res = await fetch(`${base}/api/attachments/${attId}`);
+			if (!res.ok) throw new Error(await res.text());
+			const doc = await pdfjs.getDocument({ data: await res.arrayBuffer() }).promise;
+			el.innerHTML = '';
+			const width = el.clientWidth;
+			for (let i = 1; i <= doc.numPages; i++) {
+				const page = await doc.getPage(i);
+				const scale = width / page.getViewport({ scale: 1 }).width;
+				const vp = page.getViewport({ scale: scale * (window.devicePixelRatio || 1) });
+				const canvas = document.createElement('canvas');
+				canvas.width = vp.width;
+				canvas.height = vp.height;
+				canvas.style.width = '100%';
+				el.appendChild(canvas);
+				await page.render({ canvas, canvasContext: canvas.getContext('2d'), viewport: vp })
+					.promise;
+			}
+		} catch (e) {
+			el.textContent = `Failed to load PDF: ${e.message}`;
+		}
+	}
 	let commentText = $state('');
 	let commentFiles = $state(null);
 	let commenting = $state(false);
@@ -459,9 +493,8 @@
 		{#if viewerAtt.mimetype?.startsWith('image/')}
 			<img class="viewer-body" src="{base}/api/attachments/{viewerAtt.id}" alt={viewerAtt.name} />
 		{:else if viewerAtt.mimetype === 'application/pdf'}
-			<!-- ponytail: iOS iframe shows only page 1 of PDFs; Download covers the rest -->
-			<iframe class="viewer-body" src="{base}/api/attachments/{viewerAtt.id}" title={viewerAtt.name}
-			></iframe>
+			<!-- pdf.js canvases — iOS WebKit won't render PDFs in an iframe -->
+			<div class="viewer-body viewer-pdf" bind:this={pdfBox}>Loading PDF…</div>
 		{:else}
 			<p class="viewer-none">No preview available — use Download.</p>
 		{/if}
@@ -505,6 +538,16 @@
 	}
 	img.viewer-body {
 		background: transparent;
+	}
+	.viewer-pdf {
+		overflow-y: auto;
+		-webkit-overflow-scrolling: touch;
+		padding: 8px;
+		color: #333;
+	}
+	.viewer-pdf :global(canvas) {
+		display: block;
+		margin: 0 auto 8px;
 	}
 	.viewer-none {
 		margin: auto;

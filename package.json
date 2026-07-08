@@ -23,6 +23,7 @@
 	"dependencies": {
 		"@fontsource-variable/fraunces": "^5.2.9",
 		"@fontsource-variable/inter": "^5.2.8",
+		"pdfjs-dist": "^6.1.200",
 		"web-push": "^3.6.7"
 	}
 }
