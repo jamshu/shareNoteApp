@@ -41,9 +41,16 @@
 		saveBody();
 	}
 
-	// body edits always persist the mode too, so a reload restores the same editor
+	// body edits always persist the mode too, so a reload restores the same editor.
+	// x_studio_notes is an Odoo html field whose server-side sanitizer mangles raw
+	// markdown, so md source lives in x_studio_notes_md (text) and x_studio_notes
+	// gets the rendered html (keeps the Odoo backend view readable).
 	function saveBody() {
-		scheduleSave({ x_studio_notes: src, x_studio_editor_mode: editorMode });
+		scheduleSave(
+			editorMode === 'md'
+				? { x_studio_notes_md: src, x_studio_notes: marked.parse(src), x_studio_editor_mode: 'md' }
+				: { x_studio_notes: src, x_studio_editor_mode: 'html' }
+		);
 	}
 
 	// contenteditable mounts empty when html editing starts — fill it once
@@ -78,17 +85,20 @@
 	onMount(async () => {
 		try {
 			const [n] = await odooClient.searchRecords([['id', '=', noteId]], [
-				'x_name', 'x_studio_notes', 'x_studio_date', 'x_studio_permission',
+				'x_name', 'x_studio_notes', 'x_studio_notes_md', 'x_studio_date', 'x_studio_permission',
 				'x_studio_follower_ids', 'x_studio_group_ids', 'create_uid', 'x_studio_editor_mode'
 			]);
 			if (!n) { error = 'Note not found or not shared with you.'; return; }
 			note = n;
 			followerIds = n.x_studio_follower_ids || [];
 			groupIds = n.x_studio_group_ids || [];
-			src = n.x_studio_notes || '';
+			const html = n.x_studio_notes || '';
 			// stored preference wins; fall back to content sniff (pre-field notes)
 			editorMode =
-				n.x_studio_editor_mode || (src.trim() && !/^\s*</.test(src) ? 'md' : 'html');
+				n.x_studio_editor_mode || (html.trim() && !/^\s*</.test(html) ? 'md' : 'html');
+			// md notes saved before x_studio_notes_md existed only have the
+			// sanitizer-mangled html — turndown them back as a best effort
+			src = editorMode === 'md' ? n.x_studio_notes_md || toMarkdown(html) : html;
 			await Promise.all([loadComments(), loadShareData()]);
 		} catch (e) {
 			error = e.message;
