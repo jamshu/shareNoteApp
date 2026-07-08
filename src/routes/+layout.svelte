@@ -111,6 +111,7 @@
 				{#if pushState === 'off'}
 					<button class="btn btn--sm" title="Enable notifications" onclick={enablePush}>🔔</button>
 				{/if}
+				<a href="{base}/account" class="btn btn--sm" title="Account">👤</a>
 				<button class="btn btn--sm wide-btn" title={wide ? 'Normal width' : 'Full width'} onclick={toggleWide}>
 					{wide ? '🡘' : '⛶'}
 				</button>

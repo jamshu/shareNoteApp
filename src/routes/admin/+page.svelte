@@ -2,8 +2,10 @@
 	import { onMount } from 'svelte';
 	import { base } from '$app/paths';
 	import { user } from '$lib/auth.js';
+	import ConfirmButton from '$lib/components/ConfirmButton.svelte';
 
 	let pending = $state([]);
+	let members = $state([]);
 	let error = $state('');
 	let loading = $state(true);
 	let copied = $state(false);
@@ -22,6 +24,7 @@
 			const d = await res.json();
 			if (!d.ok) throw new Error(d.error);
 			pending = d.pending;
+			members = d.members || [];
 		} catch (e) {
 			error = e.message;
 		} finally {
@@ -83,6 +86,27 @@
 			<div class="actions">
 				<button class="btn btn--sm btn--primary" onclick={() => act(p.id, 'approve')}>Approve</button>
 				<button class="btn btn--sm btn--danger" onclick={() => act(p.id, 'reject')}>Reject</button>
+			</div>
+		</div>
+	{/each}
+{/if}
+
+<div class="section-title"><span class="emo">👥</span> Members</div>
+{#if !loading && members.length === 0}
+	<p class="muted">No other members yet.</p>
+{:else}
+	{#each members as m, i (m.id)}
+		<div class="card pending-row fade-in" style="--fade-delay: {i * 0.04}s">
+			<div>
+				<strong>{m.name}</strong>
+				<div class="muted">{m.email}</div>
+			</div>
+			<div class="actions">
+				<ConfirmButton
+					label="Remove"
+					confirmLabel="Delete user + their notes?"
+					onconfirm={() => act(m.id, 'remove')}
+				/>
 			</div>
 		</div>
 	{/each}

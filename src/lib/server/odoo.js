@@ -308,3 +308,59 @@ export async function destroySession(sessionId) {
 		/* ignore — cookie is cleared regardless */
 	}
 }
+
+/* ---------------------------- account deletion ---------------------------- */
+
+/**
+ * Hard-delete a user and everything they own: their notes (with all comments on
+ * them), their comments on other notes, groups they created, push subscriptions,
+ * and follower/group memberships. Authorization is the caller's responsibility.
+ */
+export async function deleteUserAccount(uid) {
+	const NOTES = env.ODOO_MODEL || 'x_notes';
+
+	// drop them from follower lists and group memberships
+	const followed = await adminExecute(NOTES, 'search', [[['x_studio_follower_ids', 'in', [uid]]]]);
+	if (followed.length) {
+		await adminExecute(NOTES, 'write', [followed, { x_studio_follower_ids: [[3, uid]] }]);
+	}
+	const memberOf = await adminExecute('x_follower_group', 'search', [
+		[['x_studio_member_ids', 'in', [uid]]]
+	]);
+	if (memberOf.length) {
+		await adminExecute('x_follower_group', 'write', [memberOf, { x_studio_member_ids: [[3, uid]] }]);
+	}
+
+	// their notes, including everyone's comments on those notes
+	const notes = await adminExecute(NOTES, 'search', [[['create_uid', '=', uid]]]);
+	if (notes.length) {
+		const noteComments = await adminExecute('x_note_comment', 'search', [
+			[['x_studio_note_id', 'in', notes]]
+		]);
+		if (noteComments.length) await adminExecute('x_note_comment', 'unlink', [noteComments]);
+		await adminExecute(NOTES, 'unlink', [notes]);
+	}
+
+	// their comments on other people's notes
+	const comments = await adminExecute('x_note_comment', 'search', [[['create_uid', '=', uid]]]);
+	if (comments.length) await adminExecute('x_note_comment', 'unlink', [comments]);
+
+	// groups and push subscriptions they own
+	const ownGroups = await adminExecute('x_follower_group', 'search', [[['create_uid', '=', uid]]]);
+	if (ownGroups.length) await adminExecute('x_follower_group', 'unlink', [ownGroups]);
+	const subs = await adminExecute('x_push_subscription', 'search', [
+		[['x_studio_user_id', '=', uid]]
+	]);
+	if (subs.length) await adminExecute('x_push_subscription', 'unlink', [subs]);
+
+	// finally the user itself, plus its partner (best-effort — may be referenced)
+	const [u] = await adminExecute('res.users', 'read', [[uid]], { fields: ['partner_id'] });
+	await adminExecute('res.users', 'unlink', [[uid]]);
+	if (u?.partner_id?.[0]) {
+		try {
+			await adminExecute('res.partner', 'unlink', [[u.partner_id[0]]]);
+		} catch {
+			/* partner referenced elsewhere — leave it */
+		}
+	}
+}
