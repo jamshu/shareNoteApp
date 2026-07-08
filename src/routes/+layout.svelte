@@ -8,7 +8,7 @@
 	import { base } from '$app/paths';
 	import { user, checkSession, logout } from '$lib/auth.js';
 	import { applyTheme, THEMES, coerceTheme } from '$lib/themes.js';
-	import { pushSupported, registerSW, currentSubscription, subscribePush } from '$lib/push.js';
+	import { pushSupported, registerSW, currentSubscription, subscribePush, unsubscribePush } from '$lib/push.js';
 
 	let { children } = $props();
 
@@ -74,6 +74,10 @@
 	}
 
 	async function doLogout() {
+		// unbind this device's push before the session dies — otherwise the next
+		// account on this browser inherits a subscription pointed at this user
+		await unsubscribePush().catch(() => {});
+		if (pushState === 'on') pushState = 'off';
 		await logout();
 		goto(`${base}/login`);
 	}

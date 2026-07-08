@@ -1,6 +1,7 @@
 <script>
 	import { base } from '$app/paths';
 	import { user } from '$lib/auth.js';
+	import { unsubscribePush } from '$lib/push.js';
 	import ConfirmButton from '$lib/components/ConfirmButton.svelte';
 
 	let password = $state('');
@@ -15,6 +16,9 @@
 		busy = true;
 		error = '';
 		try {
+			// drop this device's push subscription while the session still works —
+			// it survives page reloads and would hide the bell for the next account
+			await unsubscribePush().catch(() => {});
 			const res = await fetch(`${base}/api/account`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
