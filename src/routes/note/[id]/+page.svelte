@@ -38,7 +38,12 @@
 		if (to === editorMode) return;
 		src = to === 'md' ? toMarkdown(src) : marked.parse(src);
 		editorMode = to;
-		scheduleSave({ x_studio_notes: src });
+		saveBody();
+	}
+
+	// body edits always persist the mode too, so a reload restores the same editor
+	function saveBody() {
+		scheduleSave({ x_studio_notes: src, x_studio_editor_mode: editorMode });
 	}
 
 	// contenteditable mounts empty when html editing starts — fill it once
@@ -74,15 +79,16 @@
 		try {
 			const [n] = await odooClient.searchRecords([['id', '=', noteId]], [
 				'x_name', 'x_studio_notes', 'x_studio_date', 'x_studio_permission',
-				'x_studio_follower_ids', 'x_studio_group_ids', 'create_uid'
+				'x_studio_follower_ids', 'x_studio_group_ids', 'create_uid', 'x_studio_editor_mode'
 			]);
 			if (!n) { error = 'Note not found or not shared with you.'; return; }
 			note = n;
 			followerIds = n.x_studio_follower_ids || [];
 			groupIds = n.x_studio_group_ids || [];
 			src = n.x_studio_notes || '';
-			// rich text is the default; markdown only when the note already holds markdown
-			editorMode = src.trim() && !/^\s*</.test(src) ? 'md' : 'html';
+			// stored preference wins; fall back to content sniff (pre-field notes)
+			editorMode =
+				n.x_studio_editor_mode || (src.trim() && !/^\s*</.test(src) ? 'md' : 'html');
 			await Promise.all([loadComments(), loadShareData()]);
 		} catch (e) {
 			error = e.message;
@@ -265,7 +271,7 @@
 					.join('\n')
 			: before + sel + after;
 		src = src.slice(0, start) + insert + src.slice(end);
-		scheduleSave({ x_studio_notes: src });
+		saveBody();
 		requestAnimationFrame(() => {
 			el.focus();
 			el.setSelectionRange(start, start + insert.length);
@@ -278,7 +284,7 @@
 		bodyEl?.focus();
 		document.execCommand(cmd, false, value);
 		src = bodyEl.innerHTML;
-		scheduleSave({ x_studio_notes: src });
+		saveBody();
 	}
 
 	function addLink() {
@@ -457,7 +463,7 @@
 				bind:this={mdEl}
 				bind:value={src}
 				placeholder="Write your note in markdown…"
-				oninput={() => scheduleSave({ x_studio_notes: src })}
+				oninput={saveBody}
 			></textarea>
 		{:else}
 			<div
@@ -465,7 +471,7 @@
 				bind:this={bodyEl}
 				contenteditable="true"
 				data-placeholder="Write your note…"
-				oninput={() => { src = bodyEl.innerHTML; scheduleSave({ x_studio_notes: src }); }}
+				oninput={() => { src = bodyEl.innerHTML; saveBody(); }}
 			></div>
 		{/if}
 	{:else if src.trim()}
