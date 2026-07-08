@@ -5,7 +5,7 @@ import { refreshSessionCookie } from '$lib/server/session.js';
 
 export const prerender = false;
 
-export async function GET({ params, cookies }) {
+export async function GET({ params, cookies, url }) {
 	try {
 		assertConfigured();
 		const { sid, ctx } = await requireApprovedUser(cookies);
@@ -21,10 +21,11 @@ export async function GET({ params, cookies }) {
 		const att = result?.[0];
 		if (!att?.raw) return new Response('Not found', { status: 404 });
 		const bytes = Buffer.from(att.raw, 'base64');
+		const disp = url.searchParams.has('download') ? 'attachment' : 'inline';
 		return new Response(bytes, {
 			headers: {
 				'Content-Type': att.mimetype || 'application/octet-stream',
-				'Content-Disposition': `inline; filename="${encodeURIComponent(att.name || 'file')}"`,
+				'Content-Disposition': `${disp}; filename="${encodeURIComponent(att.name || 'file')}"`,
 				'Cache-Control': 'private, max-age=3600'
 			}
 		});

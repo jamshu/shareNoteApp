@@ -24,6 +24,7 @@
 	// comments
 	let comments = $state([]);
 	let attachments = $state([]); // flat list, joined by commentId
+	let viewerAtt = $state(null); // attachment open in the in-app viewer overlay
 	let commentText = $state('');
 	let commentFiles = $state(null);
 	let commenting = $state(false);
@@ -405,9 +406,9 @@
 			{#if commentAtts(c.id).length}
 				<div class="atts">
 					{#each commentAtts(c.id) as a (a.id)}
-						<a class="chip" href="{base}/api/attachments/{a.id}" target="_blank" rel="noopener">
+						<button type="button" class="chip" onclick={() => (viewerAtt = a)}>
 							📎 {a.name}
-						</a>
+						</button>
 					{/each}
 				</div>
 			{/if}
@@ -435,7 +436,80 @@
 	<p class="muted" style="margin-top:40px;">Loading…</p>
 {/if}
 
+<svelte:window onkeydown={(e) => e.key === 'Escape' && (viewerAtt = null)} />
+
+{#if viewerAtt}
+	<div
+		class="viewer"
+		role="dialog"
+		aria-label={viewerAtt.name}
+		onclick={(e) => e.target === e.currentTarget && (viewerAtt = null)}
+	>
+		<div class="viewer-head">
+			<span class="viewer-name">{viewerAtt.name}</span>
+			<a
+				class="btn btn--sm"
+				href="{base}/api/attachments/{viewerAtt.id}?download=1"
+				download={viewerAtt.name}
+			>
+				⬇ Download
+			</a>
+			<button class="btn btn--sm" onclick={() => (viewerAtt = null)}>✕</button>
+		</div>
+		{#if viewerAtt.mimetype?.startsWith('image/')}
+			<img class="viewer-body" src="{base}/api/attachments/{viewerAtt.id}" alt={viewerAtt.name} />
+		{:else if viewerAtt.mimetype === 'application/pdf'}
+			<!-- ponytail: iOS iframe shows only page 1 of PDFs; Download covers the rest -->
+			<iframe class="viewer-body" src="{base}/api/attachments/{viewerAtt.id}" title={viewerAtt.name}
+			></iframe>
+		{:else}
+			<p class="viewer-none">No preview available — use Download.</p>
+		{/if}
+	</div>
+{/if}
+
 <style>
+	.viewer {
+		position: fixed;
+		inset: 0;
+		z-index: 50;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		padding: 12px;
+		padding-top: calc(12px + env(safe-area-inset-top));
+		background: rgba(0, 0, 0, 0.85);
+	}
+	.viewer-head {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.viewer-name {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: #fff;
+		font-size: 0.9rem;
+	}
+	.viewer-body {
+		flex: 1;
+		min-height: 0;
+		width: 100%;
+		object-fit: contain;
+		border: none;
+		border-radius: 10px;
+		background: #fff;
+	}
+	img.viewer-body {
+		background: transparent;
+	}
+	.viewer-none {
+		margin: auto;
+		color: #fff;
+	}
 	.head-row {
 		display: flex;
 		align-items: center;
