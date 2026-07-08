@@ -34,7 +34,7 @@ export async function POST({ request, cookies }) {
 		const id = await userCall(cookies, sid, ctx, 'ir.attachment', 'create', [{
 			name,
 			mimetype: mimetype || 'application/octet-stream',
-			datas: dataBase64,
+			raw: dataBase64, // Odoo 19: 'datas' removed, binary is 'raw' (base64 over JSON-RPC)
 			res_model: COMMENT_MODEL,
 			res_id: Number(commentId)
 		}]);

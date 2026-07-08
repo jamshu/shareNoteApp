@@ -14,13 +14,13 @@ export async function GET({ params, cookies }) {
 			sid,
 			'ir.attachment',
 			'read',
-			[[Number(params.id)], ['name', 'mimetype', 'datas']],
+			[[Number(params.id)], ['name', 'mimetype', 'raw']],
 			{ context: odooCtx }
 		);
 		refreshSessionCookie(cookies, sessionId, sid);
 		const att = result?.[0];
-		if (!att?.datas) return new Response('Not found', { status: 404 });
-		const bytes = Buffer.from(att.datas, 'base64');
+		if (!att?.raw) return new Response('Not found', { status: 404 });
+		const bytes = Buffer.from(att.raw, 'base64');
 		return new Response(bytes, {
 			headers: {
 				'Content-Type': att.mimetype || 'application/octet-stream',
