@@ -6,13 +6,48 @@
 	import { user } from '$lib/auth.js';
 	import { odooClient } from '$lib/odoo.js';
 	import ConfirmButton from '$lib/components/ConfirmButton.svelte';
+	import { marked } from 'marked';
+	import DOMPurify from 'dompurify';
+	import TurndownService from 'turndown';
+
+	marked.setOptions({ gfm: true, breaks: true });
 
 	const noteId = Number($page.params.id);
 
 	let note = $state(null);
 	let error = $state('');
 	let syncState = $state('idle'); // idle | saving | saved | error
-	let bodyEl = $state(null);
+
+	// note body: source in either markdown or html, rendered view for both.
+	// Mode inferred from content (html starts with '<'), switchable while editing.
+	let editing = $state(false);
+	let editorMode = $state('html'); // 'md' | 'html'
+	let src = $state('');
+	let mdEl = $state(null); // markdown textarea, for toolbar syntax insertion
+	let bodyEl = $state(null); // contenteditable div (html mode)
+	let rendered = $derived(DOMPurify.sanitize(editorMode === 'md' ? marked.parse(src) : src));
+
+	let turndown;
+	function toMarkdown(s) {
+		if (!/^\s*</.test(s)) return s;
+		turndown ??= new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
+		return turndown.turndown(s);
+	}
+
+	function switchMode(to) {
+		if (to === editorMode) return;
+		src = to === 'md' ? toMarkdown(src) : marked.parse(src);
+		editorMode = to;
+		scheduleSave({ x_studio_notes: src });
+	}
+
+	// contenteditable mounts empty when html editing starts — fill it once
+	$effect(() => {
+		if (editing && editorMode === 'html' && bodyEl && bodyEl.dataset.filled !== '1') {
+			bodyEl.innerHTML = src;
+			bodyEl.dataset.filled = '1';
+		}
+	});
 
 	// share panel
 	let shareOpen = $state(false);
@@ -45,18 +80,12 @@
 			note = n;
 			followerIds = n.x_studio_follower_ids || [];
 			groupIds = n.x_studio_group_ids || [];
-			if (bodyEl) bodyEl.innerHTML = n.x_studio_notes || '';
+			src = n.x_studio_notes || '';
+			// rich text is the default; markdown only when the note already holds markdown
+			editorMode = src.trim() && !/^\s*</.test(src) ? 'md' : 'html';
 			await Promise.all([loadComments(), loadShareData()]);
 		} catch (e) {
 			error = e.message;
-		}
-	});
-
-	$effect(() => {
-		// bodyEl binds after the {#if note} block renders
-		if (bodyEl && note && !bodyEl.dataset.filled) {
-			bodyEl.innerHTML = note.x_studio_notes || '';
-			bodyEl.dataset.filled = '1';
 		}
 	});
 
@@ -221,21 +250,45 @@
 	const fmtWhen = (d) => (d ? new Date(d + 'Z').toLocaleString() : '');
 	const commentAtts = (cid) => attachments.filter((a) => a.commentId === cid);
 
-	/* ── rich text toolbar ───────────────────────────────────────────── */
-	// ponytail: execCommand is deprecated but universally supported and dependency-free;
-	// swap for Tiptap if it ever breaks.
+	/* ── markdown toolbar ────────────────────────────────────────────── */
+	// wrap: surrounds the selection; prefix: prepends each selected line
+	function insertMd({ wrap: [before, after] = ['', ''], prefix = '' } = {}) {
+		const el = mdEl;
+		if (!el) return;
+		const start = el.selectionStart;
+		const end = el.selectionEnd;
+		const sel = src.slice(start, end) || 'text';
+		const insert = prefix
+			? sel
+					.split('\n')
+					.map((l) => prefix + l)
+					.join('\n')
+			: before + sel + after;
+		src = src.slice(0, start) + insert + src.slice(end);
+		scheduleSave({ x_studio_notes: src });
+		requestAnimationFrame(() => {
+			el.focus();
+			el.setSelectionRange(start, start + insert.length);
+		});
+	}
+
+	/* ── rich text (html) toolbar ────────────────────────────────────── */
+	// ponytail: execCommand is deprecated but universally supported and dependency-free
 	function exec(cmd, value = null) {
 		bodyEl?.focus();
 		document.execCommand(cmd, false, value);
-		scheduleSave({ x_studio_notes: bodyEl.innerHTML });
+		src = bodyEl.innerHTML;
+		scheduleSave({ x_studio_notes: src });
 	}
 
 	function addLink() {
 		const url = prompt('Link URL (https://…)');
-		if (url) exec('createLink', url);
+		if (!url) return;
+		if (editorMode === 'md') insertMd({ wrap: ['[', `](${url})`] });
+		else exec('createLink', url);
 	}
 
-	const TOOLBAR = [
+	const HTML_TOOLBAR = [
 		{ cmd: 'bold', label: 'B', title: 'Bold', style: 'font-weight:700' },
 		{ cmd: 'italic', label: 'I', title: 'Italic', style: 'font-style:italic' },
 		{ cmd: 'underline', label: 'U', title: 'Underline', style: 'text-decoration:underline' },
@@ -257,6 +310,24 @@
 		{ sep: true },
 		{ link: true, label: '🔗', title: 'Insert link' },
 		{ cmd: 'removeFormat', label: '✕', title: 'Clear formatting' }
+	];
+
+	const MD_TOOLBAR = [
+		{ wrap: ['**', '**'], label: 'B', title: 'Bold', style: 'font-weight:700' },
+		{ wrap: ['*', '*'], label: 'I', title: 'Italic', style: 'font-style:italic' },
+		{ wrap: ['~~', '~~'], label: 'S', title: 'Strikethrough', style: 'text-decoration:line-through' },
+		{ wrap: ['`', '`'], label: '`x`', title: 'Inline code' },
+		{ sep: true },
+		{ prefix: '# ', label: 'H1', title: 'Heading 1' },
+		{ prefix: '## ', label: 'H2', title: 'Heading 2' },
+		{ prefix: '### ', label: 'H3', title: 'Heading 3' },
+		{ sep: true },
+		{ prefix: '- ', label: '•', title: 'Bullet list' },
+		{ prefix: '1. ', label: '1.', title: 'Numbered list' },
+		{ prefix: '> ', label: '❝', title: 'Quote' },
+		{ wrap: ['\n```\n', '\n```\n'], label: '</>', title: 'Code block' },
+		{ sep: true },
+		{ link: true, label: '🔗', title: 'Insert link' }
 	];
 </script>
 
@@ -338,8 +409,26 @@
 	/>
 
 	{#if canEdit}
+		<div class="edit-toggle">
+			{#if editing}
+				<button
+					class="chip {editorMode === 'md' ? 'chip--accent' : ''}"
+					onclick={() => switchMode('md')}
+				>Markdown</button>
+				<button
+					class="chip {editorMode === 'html' ? 'chip--accent' : ''}"
+					onclick={() => switchMode('html')}
+				>Rich text</button>
+			{/if}
+			<span class="spacer"></span>
+			<button class="btn btn--sm {editing ? 'btn--primary' : ''}" onclick={() => (editing = !editing)}>
+				{editing ? '✓ Done' : '✏️ Edit'}
+			</button>
+		</div>
+	{/if}
+	{#if canEdit && editing}
 		<div class="toolbar card">
-			{#each TOOLBAR as t, i (i)}
+			{#each editorMode === 'md' ? MD_TOOLBAR : HTML_TOOLBAR as t, i (editorMode + i)}
 				{#if t.sep}
 					<span class="tb-sep"></span>
 				{:else}
@@ -348,26 +437,45 @@
 						title={t.title}
 						style={t.style || ''}
 						onmousedown={(e) => e.preventDefault()}
-						onclick={() => (t.link ? addLink() : exec(t.cmd, t.value))}
+						onclick={() => (t.link ? addLink() : editorMode === 'md' ? insertMd(t) : exec(t.cmd, t.value))}
 					>{t.label}</button>
 				{/if}
 			{/each}
-			<span class="tb-sep"></span>
-			<label class="tb-color" title="Text color">
-				A<input type="color" onchange={(e) => exec('foreColor', e.target.value)} />
-			</label>
-			<label class="tb-color" title="Highlight">
-				🖊<input type="color" value="#fff59d" onchange={(e) => exec('hiliteColor', e.target.value)} />
-			</label>
+			{#if editorMode === 'html'}
+				<span class="tb-sep"></span>
+				<label class="tb-color" title="Text color">
+					A<input type="color" onchange={(e) => exec('foreColor', e.target.value)} />
+				</label>
+				<label class="tb-color" title="Highlight">
+					🖊<input type="color" value="#fff59d" onchange={(e) => exec('hiliteColor', e.target.value)} />
+				</label>
+			{/if}
+		</div>
+		{#if editorMode === 'md'}
+			<textarea
+				class="input md-input"
+				bind:this={mdEl}
+				bind:value={src}
+				placeholder="Write your note in markdown…"
+				oninput={() => scheduleSave({ x_studio_notes: src })}
+			></textarea>
+		{:else}
+			<div
+				class="richtext"
+				bind:this={bodyEl}
+				contenteditable="true"
+				data-placeholder="Write your note…"
+				oninput={() => { src = bodyEl.innerHTML; scheduleSave({ x_studio_notes: src }); }}
+			></div>
+		{/if}
+	{:else if src.trim()}
+		<!-- eslint-disable-next-line svelte/no-at-html-tags — sanitized with DOMPurify above -->
+		<div class="richtext md-view">{@html rendered}</div>
+	{:else}
+		<div class="richtext md-view muted">
+			{canEdit ? 'Empty note — tap Edit to write.' : 'Empty note.'}
 		</div>
 	{/if}
-	<div
-		class="richtext"
-		bind:this={bodyEl}
-		contenteditable={canEdit}
-		data-placeholder="Write your note…"
-		oninput={() => scheduleSave({ x_studio_notes: bodyEl.innerHTML })}
-	></div>
 
 	<div class="section-title"><span class="emo">💬</span> Comments</div>
 	{#each comments as c (c.id)}
@@ -579,6 +687,15 @@
 		background: var(--border);
 		margin: 0 5px;
 	}
+	.edit-toggle {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-bottom: 8px;
+	}
+	.edit-toggle .spacer {
+		flex: 1;
+	}
 	.tb-color {
 		position: relative;
 		min-width: 32px;
@@ -601,11 +718,64 @@
 		opacity: 0;
 		cursor: pointer;
 	}
+	.md-input {
+		width: 100%;
+		min-height: 220px;
+		font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+		font-size: 0.9rem;
+		line-height: 1.55;
+		resize: vertical;
+	}
 	/* rendered note content */
 	.richtext :global(h1),
 	.richtext :global(h2),
 	.richtext :global(h3) {
 		margin: 0.6em 0 0.3em;
+		font-family: var(--font-display);
+		letter-spacing: -0.015em;
+	}
+	.richtext :global(h1) {
+		font-size: 1.45rem;
+	}
+	.richtext :global(h2) {
+		font-size: 1.2rem;
+	}
+	.richtext :global(h3) {
+		font-size: 1.05rem;
+	}
+	.richtext :global(p) {
+		margin: 0.5em 0;
+	}
+	.richtext :global(code) {
+		background: var(--surface-2);
+		border-radius: 5px;
+		padding: 1px 5px;
+		font-size: 0.86em;
+	}
+	.richtext :global(pre code) {
+		background: none;
+		padding: 0;
+	}
+	.richtext :global(hr) {
+		border: none;
+		border-top: 1px solid var(--border);
+		margin: 1em 0;
+	}
+	.richtext :global(table) {
+		border-collapse: collapse;
+		margin: 0.6em 0;
+		max-width: 100%;
+		overflow-x: auto;
+		display: block;
+	}
+	.richtext :global(th),
+	.richtext :global(td) {
+		border: 1px solid var(--border);
+		padding: 5px 10px;
+		font-size: 0.9rem;
+	}
+	.richtext :global(th) {
+		background: var(--surface-2);
 	}
 	.richtext :global(ul),
 	.richtext :global(ol) {

@@ -14,6 +14,12 @@
 
 	let pushState = $state('unknown'); // unknown | off | on | unsupported
 	let themeOpen = $state(false);
+	let wide = $state(false); // stretch layout to full width on big screens
+
+	function toggleWide() {
+		wide = !wide;
+		localStorage.setItem('wide', wide ? '1' : '0');
+	}
 
 	const PUBLIC_ROUTES = ['/login', '/signup'];
 	const isPublic = (path) => PUBLIC_ROUTES.some((p) => path.startsWith(`${base}${p}`));
@@ -38,6 +44,7 @@
 
 	onMount(async () => {
 		applyTheme(coerceTheme(localStorage.getItem('theme')));
+		wide = localStorage.getItem('wide') === '1';
 		await checkSession();
 		registerSW();
 		if (!pushSupported()) {
@@ -72,7 +79,7 @@
 	}
 </script>
 
-<div class="app">
+<div class="app" class:app--wide={wide}>
 	{#if $user === undefined}
 		<p class="muted" style="text-align:center; margin-top:40vh">Loading…</p>
 	{:else if $user === null}
@@ -104,6 +111,9 @@
 				{#if pushState === 'off'}
 					<button class="btn btn--sm" title="Enable notifications" onclick={enablePush}>🔔</button>
 				{/if}
+				<button class="btn btn--sm wide-btn" title={wide ? 'Normal width' : 'Full width'} onclick={toggleWide}>
+					{wide ? '🡘' : '⛶'}
+				</button>
 				<button class="btn btn--sm" title="Theme" onclick={() => (themeOpen = !themeOpen)}>🎨</button>
 				<button class="btn btn--sm" title="Log out" onclick={doLogout}>↪</button>
 			</div>
@@ -127,6 +137,12 @@
 </div>
 
 <style>
+	/* pointless on phones — layout is already full width there */
+	@media (max-width: 800px) {
+		.wide-btn {
+			display: none;
+		}
+	}
 	.topbar {
 		display: flex;
 		align-items: center;

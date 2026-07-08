@@ -159,6 +159,9 @@ h3 {
 	letter-spacing: -0.015em;
 }
 
+.app--wide {
+	--maxw: none;
+}
 .app {
 	max-width: var(--maxw);
 	margin: 0 auto;
