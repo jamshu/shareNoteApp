@@ -2,6 +2,7 @@ import webpush from 'web-push';
 import { createSign } from 'node:crypto';
 import { connect } from 'node:http2';
 import { env } from '$env/dynamic/private';
+import { env as publicEnv } from '$env/dynamic/public';
 import { adminExecute } from './odoo.js';
 
 const SUB_MODEL = 'x_push_subscription';
@@ -15,7 +16,8 @@ function ensureVapid() {
 	if (subject && !/^(mailto:|https?:)/.test(subject)) {
 		subject = subject.includes('@') ? `mailto:${subject}` : `https://${subject}`;
 	}
-	const pub = (env.VAPID_PUBLIC_KEY || '').trim();
+	// $env/dynamic/private excludes PUBLIC_-prefixed vars — the key lives there
+	const pub = (publicEnv.PUBLIC_VAPID_PUBLIC_KEY || env.VAPID_PUBLIC_KEY || '').trim();
 	const priv = (env.VAPID_PRIVATE_KEY || '').trim();
 	console.log(
 		`[push] vapid setup: subject=${subject || 'MISSING'} pubLen=${pub.length} privLen=${priv.length}`
