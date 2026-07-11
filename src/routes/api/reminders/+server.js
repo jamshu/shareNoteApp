@@ -185,7 +185,11 @@ export async function POST({ request, cookies, url }) {
 			partner_ids: [[6, 0, targets.map((u) => info[u]?.partnerId).filter(Boolean)]],
 			subject: `Reminder: ${a.title}`,
 			body,
-			scheduled_date: dt
+			scheduled_date: dt,
+			// post as a comment: Odoo web-pushes 'comment' messages to all
+			// recipients, but 'notification' (the default) only to inbox-pref
+			// users — our users are email-pref, so phones stayed silent
+			notification_parameters: JSON.stringify({ message_type: 'comment' })
 		}]);
 
 		// heads-up push now — best-effort, never fail the write
