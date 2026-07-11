@@ -34,7 +34,13 @@ async function mailRefs() {
 	const [todo] = await adminExecute('ir.model.data', 'search_read', [
 		[['module', '=', 'mail'], ['name', '=', 'mail_activity_data_todo']]
 	], { fields: ['res_id'] });
-	_refs = { modelId, todoTypeId: todo?.res_id || false };
+	// OdooBot partner: scheduled messages are authored by the bot, because Odoo
+	// never notifies a message's own author — a creator-authored reminder would
+	// silently skip the creator (self-reminders got no due-date email)
+	const [root] = await adminExecute('ir.model.data', 'search_read', [
+		[['module', '=', 'base'], ['name', '=', 'partner_root']]
+	], { fields: ['res_id'] });
+	_refs = { modelId, todoTypeId: todo?.res_id || false, botPartnerId: root?.res_id || false };
 	return _refs;
 }
 
@@ -59,10 +65,14 @@ async function assertNoteAccess(cookies, noteId) {
 	return { uid, sid, odooCtx };
 }
 
-/** id -> partner id for the given user ids. */
-async function partnersOf(userIds) {
-	const users = await adminExecute('res.users', 'read', [userIds], { fields: ['partner_id'] });
-	return Object.fromEntries(users.map((u) => [u.id, u.partner_id?.[0]]));
+/** id -> { partnerId, name } for the given user ids. */
+async function usersInfo(userIds) {
+	const users = await adminExecute('res.users', 'read', [userIds], {
+		fields: ['partner_id', 'name']
+	});
+	return Object.fromEntries(
+		users.map((u) => [u.id, { partnerId: u.partner_id?.[0], name: u.name }])
+	);
 }
 
 // Odoo datetimes are naive UTC "YYYY-MM-DD HH:MM:SS"
@@ -73,7 +83,7 @@ export async function GET({ url, cookies }) {
 		assertConfigured();
 		const noteId = Number(url.searchParams.get('noteId'));
 		if (!noteId) return json({ ok: false, error: 'noteId required' }, { status: 400 });
-		const { uid } = await assertNoteAccess(cookies, noteId);
+		await assertNoteAccess(cookies, noteId);
 
 		const a = await noteAudience(noteId);
 		const memberIds = [...new Set([a.ownerId, ...a.followerIds])].filter(Boolean);
@@ -85,7 +95,7 @@ export async function GET({ url, cookies }) {
 		const [messages, activities] = await Promise.all([
 			adminExecute('mail.scheduled.message', 'search_read', [
 				[['model', '=', NOTES()], ['res_id', '=', noteId]]
-			], { fields: ['scheduled_date', 'subject', 'partner_ids', 'create_uid'], order: 'scheduled_date asc' }),
+			], { fields: ['scheduled_date', 'subject', 'partner_ids'], order: 'scheduled_date asc' }),
 			adminExecute('mail.activity', 'search_read', [
 				[['res_model', '=', NOTES()], ['res_id', '=', noteId]]
 			], { fields: ['user_id', 'date_deadline', 'summary', 'state', 'create_uid'], order: 'date_deadline asc' })
@@ -97,7 +107,6 @@ export async function GET({ url, cookies }) {
 				id: m.id,
 				when: m.scheduled_date,
 				subject: m.subject,
-				createdBy: m.create_uid?.[0] ?? null,
 				users: m.partner_ids.map((p) => byPartner[p]).filter(Boolean).map((u) => ({ id: u.id, name: u.name }))
 			})),
 			activities: activities.map((x) => ({
@@ -108,8 +117,7 @@ export async function GET({ url, cookies }) {
 				summary: x.summary,
 				state: x.state
 			})),
-			audience: users.map((u) => ({ id: u.id, name: u.name })),
-			isOwner: a.ownerId === uid
+			audience: users.map((u) => ({ id: u.id, name: u.name }))
 		});
 	} catch (e) {
 		return json({ ok: false, error: e?.message }, { status: e?.status || 500 });
@@ -139,7 +147,7 @@ export async function POST({ request, cookies, url }) {
 		}
 
 		const refs = await mailRefs();
-		const partnerOf = await partnersOf([...new Set([...targets, uid])]);
+		const info = await usersInfo([...new Set([...targets, uid])]);
 		const dt = toOdooDt(when);
 		const title = summary.trim() || `Reminder: ${a.title}`;
 
@@ -163,15 +171,18 @@ export async function POST({ request, cookies, url }) {
 		}
 
 		// due-date notification: Odoo posts this on the note's chatter at `when`,
-		// emailing + web-pushing the assignee partners
+		// emailing + web-pushing the assignee partners. Authored by OdooBot, not
+		// the creator — Odoo skips notifying a message's own author, which would
+		// mute self-reminders. The body names the actual creator instead.
 		const body =
 			`<p>${esc(title)}</p>` +
+			`<p>Reminder set by ${esc(info[uid]?.name || 'a follower')}.</p>` +
 			`<p><a href="${url.origin}/note/${noteId}">Open "${esc(a.title)}" in ShareNote</a></p>`;
 		const messageId = await adminExecute('mail.scheduled.message', 'create', [{
 			model: NOTES(),
 			res_id: noteId,
-			author_id: partnerOf[uid],
-			partner_ids: [[6, 0, targets.map((u) => partnerOf[u]).filter(Boolean)]],
+			author_id: refs.botPartnerId || info[uid]?.partnerId,
+			partner_ids: [[6, 0, targets.map((u) => info[u]?.partnerId).filter(Boolean)]],
 			subject: `Reminder: ${a.title}`,
 			body,
 			scheduled_date: dt
@@ -208,17 +219,15 @@ export async function DELETE({ request, cookies }) {
 		if (!noteId || !messageId) {
 			return json({ ok: false, error: 'noteId and messageId required' }, { status: 400 });
 		}
-		const { uid } = await assertNoteAccess(cookies, noteId);
+		await assertNoteAccess(cookies, noteId);
 
+		// anyone who can see the note may cancel — scheduled messages are created
+		// with the admin key, so create_uid can't identify the actual creator
 		const [msg] = await adminExecute('mail.scheduled.message', 'read', [[Number(messageId)]], {
-			fields: ['model', 'res_id', 'create_uid', 'scheduled_date', 'partner_ids']
+			fields: ['model', 'res_id', 'scheduled_date', 'partner_ids']
 		});
 		if (!msg || msg.model !== NOTES() || msg.res_id !== noteId) {
 			return json({ ok: false, error: 'Reminder not found' }, { status: 404 });
-		}
-		const a = await noteAudience(noteId);
-		if (msg.create_uid?.[0] !== uid && a.ownerId !== uid) {
-			return json({ ok: false, error: 'Only the reminder creator or note owner can cancel' }, { status: 403 });
 		}
 
 		// drop the activities created with this reminder (same note + deadline + assignees)

@@ -10,6 +10,7 @@
 // 'fcm') are not web push — Odoo can't deliver those; they stay app-only.
 import { json } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
+import { env as publicEnv } from '$env/dynamic/public';
 import { requireUid } from '$lib/server/auth.js';
 import { adminExecute } from '$lib/server/odoo.js';
 
@@ -24,9 +25,11 @@ const b64pad = (s) => s + '='.repeat((4 - (s.length % 4)) % 4);
 let _vapidClaimed = false;
 async function claimOdooVapid() {
 	if (_vapidClaimed) return;
-	const pub = env.PUBLIC_VAPID_PUBLIC_KEY;
-	const priv = env.VAPID_PRIVATE_KEY;
-	if (pub && priv) {
+	// $env/dynamic/private excludes PUBLIC_-prefixed vars — the key lives there
+	const pub = (publicEnv.PUBLIC_VAPID_PUBLIC_KEY || env.VAPID_PUBLIC_KEY || '').trim();
+	const priv = (env.VAPID_PRIVATE_KEY || '').trim();
+	if (!pub || !priv) return; // keys not configured — retry next call, don't cache
+	{
 		const existing = await adminExecute('ir.config_parameter', 'search', [
 			[['key', 'in', ['mail.web_push_vapid_public_key', 'mail.web_push_vapid_private_key']]]
 		]);

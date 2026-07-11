@@ -73,7 +73,6 @@
 	let reminders = $state([]);
 	let remActivities = $state([]);
 	let remAudience = $state([]);
-	let remIsOwner = $state(false);
 	let remUserIds = $state([]);
 	let remWhen = $state('');
 	let remSummary = $state('');
@@ -168,7 +167,6 @@
 		reminders = d.reminders;
 		remActivities = d.activities;
 		remAudience = d.audience;
-		remIsOwner = d.isOwner;
 	}
 
 	// datetime-local min: local "now" in the input's own format
@@ -538,9 +536,7 @@
 								{/each}
 							</div>
 						</div>
-						{#if r.createdBy === $user?.uid || remIsOwner}
-							<ConfirmButton onconfirm={() => cancelReminder(r.id)} />
-						{/if}
+						<ConfirmButton onconfirm={() => cancelReminder(r.id)} />
 					</div>
 				{/each}
 			{:else}
