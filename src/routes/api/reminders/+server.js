@@ -150,6 +150,8 @@ export async function POST({ request, cookies, url }) {
 		const info = await usersInfo([...new Set([...targets, uid])]);
 		const dt = toOdooDt(when);
 		const title = summary.trim() || `Reminder: ${a.title}`;
+		// subject doubles as the UI label and the email subject — carry the summary
+		const subject = summary.trim() ? `Reminder: ${a.title} — ${summary.trim()}` : `Reminder: ${a.title}`;
 
 		// activities as the user's own session so Odoo attributes "assigned by"
 		// correctly; admin fallback when the session lacks mail.activity rights
@@ -183,7 +185,7 @@ export async function POST({ request, cookies, url }) {
 			res_id: noteId,
 			author_id: refs.botPartnerId || info[uid]?.partnerId,
 			partner_ids: [[6, 0, targets.map((u) => info[u]?.partnerId).filter(Boolean)]],
-			subject: `Reminder: ${a.title}`,
+			subject,
 			body,
 			scheduled_date: dt,
 			// post as a comment: Odoo web-pushes 'comment' messages to all
