@@ -188,10 +188,15 @@ export async function POST({ request, cookies, url }) {
 			subject,
 			body,
 			scheduled_date: dt,
-			// post as a comment: Odoo web-pushes 'comment' messages to all
-			// recipients, but 'notification' (the default) only to inbox-pref
-			// users — our users are email-pref, so phones stayed silent
-			notification_parameters: JSON.stringify({ message_type: 'comment' })
+			// comment: Odoo web-pushes 'comment' messages to all recipients, but
+			// 'notification' (the default) only to inbox-pref users — our users
+			// are email-pref, so phones stayed silent.
+			// light layout: drops the "View Note" button that points at the Odoo
+			// backend — the body carries the app link instead
+			notification_parameters: JSON.stringify({
+				message_type: 'comment',
+				email_layout_xmlid: 'mail.mail_notification_light'
+			})
 		}]);
 
 		// heads-up push now — best-effort, never fail the write
