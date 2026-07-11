@@ -8,6 +8,7 @@
 	let notes = $state([]);
 	let loading = $state(true);
 	let error = $state('');
+	let query = $state('');
 
 	const FIELDS = ['x_name', 'x_studio_date', 'x_studio_permission', 'create_uid', 'write_date'];
 
@@ -16,17 +17,39 @@
 
 	onMount(load);
 
+	// searches title + rendered html + markdown source server-side
+	const searchDomain = (q) => [
+		'|', '|',
+		['x_name', 'ilike', q],
+		['x_studio_notes', 'ilike', q],
+		['x_studio_notes_md', 'ilike', q]
+	];
+
+	let loadSeq = 0; // drop out-of-order responses from stale searches
 	async function load() {
+		const seq = ++loadSeq;
 		loading = true;
 		error = '';
 		try {
 			// record rules already limit results to own + shared-with-me notes
-			notes = await odooClient.searchRecords([], FIELDS, 'notes', { order: 'write_date desc' });
+			const q = query.trim();
+			const results = await odooClient.searchRecords(q ? searchDomain(q) : [], FIELDS, 'notes', {
+				order: 'write_date desc'
+			});
+			if (seq !== loadSeq) return;
+			notes = results;
 		} catch (e) {
+			if (seq !== loadSeq) return;
 			error = e.message;
 		} finally {
-			loading = false;
+			if (seq === loadSeq) loading = false;
 		}
+	}
+
+	let searchTimer;
+	function onSearchInput() {
+		clearTimeout(searchTimer);
+		searchTimer = setTimeout(load, 300);
 	}
 
 	async function newNote() {
@@ -69,16 +92,24 @@
 	<button class="btn btn--primary" onclick={newNote}>+ New note</button>
 </div>
 
+<input
+	class="input search-input"
+	type="search"
+	placeholder="🔍 Search notes…"
+	bind:value={query}
+	oninput={onSearchInput}
+/>
+
 {#if error}<p class="error-text">{error}</p>{/if}
 
 {#if loading}
 	<p class="muted">Loading…</p>
 {:else}
 	<div class="section-title"><span class="emo">✍️</span> My notes</div>
-	{#if mine.length}{@render noteList(mine)}{:else}<p class="muted">Nothing yet — create your first note.</p>{/if}
+	{#if mine.length}{@render noteList(mine)}{:else}<p class="muted">{query.trim() ? 'No matches.' : 'Nothing yet — create your first note.'}</p>{/if}
 
 	<div class="section-title"><span class="emo">🤝</span> Shared with me</div>
-	{#if shared.length}{@render noteList(shared)}{:else}<p class="muted">No shared notes yet.</p>{/if}
+	{#if shared.length}{@render noteList(shared)}{:else}<p class="muted">{query.trim() ? 'No matches.' : 'No shared notes yet.'}</p>{/if}
 {/if}
 
 <style>
@@ -87,6 +118,10 @@
 		align-items: center;
 		justify-content: space-between;
 		margin: 18px 0 4px;
+	}
+	.search-input {
+		width: 100%;
+		margin: 4px 0 10px;
 	}
 	.note-grid {
 		display: grid;

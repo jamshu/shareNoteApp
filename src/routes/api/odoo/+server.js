@@ -4,7 +4,7 @@
 // approval gate, company hard-scoping, and push notifications on share/comment.
 import { json } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
-import { assertConfigured, sessionCallKw, adminExecute } from '$lib/server/odoo.js';
+import { assertConfigured, sessionCallKw, adminExecute, noteVisibilityDomain } from '$lib/server/odoo.js';
 import { requireApprovedUser } from '$lib/server/auth.js';
 import { clearSessionCookie, refreshSessionCookie } from '$lib/server/session.js';
 import { notifyNoteShared, notifyComment } from '$lib/server/notify.js';
@@ -83,19 +83,15 @@ export async function POST({ request, cookies }) {
 				const { domain = [], fields = [], order, limit } = data || {};
 				// Hard-scope to the user's own tenant so a loose/misconfigured record
 				// rule can never leak another company's rows into the app.
-				const scope = companyId
-					? [['x_studio_company_id', '=', companyId]]
-					: [['create_uid', '=', uid]];
 				// Visibility hard-scope: notes/comments are private to owner +
 				// followers + group members even if the Odoo record rules are loose.
-				if (modelKey === 'notes') {
-					scope.push(
-						'|', '|',
-						['create_uid', '=', uid],
-						['x_studio_follower_ids', 'in', [uid]],
-						['x_studio_group_ids.x_studio_member_ids', 'in', [uid]]
-					);
-				} else if (modelKey === 'comments') {
+				const scope =
+					modelKey === 'notes'
+						? noteVisibilityDomain(uid, companyId)
+						: companyId
+							? [['x_studio_company_id', '=', companyId]]
+							: [['create_uid', '=', uid]];
+				if (modelKey === 'comments') {
 					scope.push(
 						'|', '|',
 						['x_studio_note_id.create_uid', '=', uid],

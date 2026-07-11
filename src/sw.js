@@ -20,7 +20,13 @@ self.addEventListener('push', (event) => {
 			payload = { body: event.data.text() };
 		}
 	}
-	const { title = 'ShareNote', body = '', url = '/' } = payload;
+	// two payload shapes: app pushes {title, body, url}; Odoo native pushes
+	// {title, options: {body, icon, data: {model, res_id}}}
+	const title = payload.title || 'ShareNote';
+	const body = payload.body ?? payload.options?.body ?? '';
+	const url =
+		payload.url ??
+		(payload.options?.data?.res_id ? `/note/${payload.options.data.res_id}` : '/');
 	event.waitUntil(
 		self.registration.showNotification(title, {
 			body,

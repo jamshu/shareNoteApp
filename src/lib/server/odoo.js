@@ -87,6 +87,24 @@ async function adminLogin() {
 	return _adminLoginPromise;
 }
 
+/**
+ * Domain limiting notes to what `uid` may see: tenant hard-scope plus
+ * owner OR direct follower OR member of a shared group. Kept app-side so a
+ * loose/misconfigured Odoo record rule can never leak rows.
+ */
+export function noteVisibilityDomain(uid, companyId) {
+	const scope = companyId
+		? [['x_studio_company_id', '=', companyId]]
+		: [['create_uid', '=', uid]];
+	scope.push(
+		'|', '|',
+		['create_uid', '=', uid],
+		['x_studio_follower_ids', 'in', [uid]],
+		['x_studio_group_ids.x_studio_member_ids', 'in', [uid]]
+	);
+	return scope;
+}
+
 export async function adminExecute(model, method, args = [], kwargs = {}) {
 	const uid = await adminLogin();
 	return service('object', 'execute_kw', [
@@ -353,8 +371,19 @@ export async function deleteUserAccount(uid) {
 	]);
 	if (subs.length) await adminExecute('x_push_subscription', 'unlink', [subs]);
 
+	// reminders assigned to them (would block user unlink) and Odoo push devices
+	// on their partner (would block partner unlink)
+	const acts = await adminExecute('mail.activity', 'search', [[['user_id', '=', uid]]]);
+	if (acts.length) await adminExecute('mail.activity', 'unlink', [acts]);
+
 	// finally the user itself, plus its partner (best-effort — may be referenced)
 	const [u] = await adminExecute('res.users', 'read', [[uid]], { fields: ['partner_id'] });
+	if (u?.partner_id?.[0]) {
+		const devices = await adminExecute('mail.push.device', 'search', [
+			[['partner_id', '=', u.partner_id[0]]]
+		]);
+		if (devices.length) await adminExecute('mail.push.device', 'unlink', [devices]);
+	}
 	await adminExecute('res.users', 'unlink', [[uid]]);
 	if (u?.partner_id?.[0]) {
 		try {

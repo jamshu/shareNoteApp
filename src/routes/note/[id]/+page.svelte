@@ -68,6 +68,17 @@
 	let followerIds = $state([]);
 	let groupIds = $state([]);
 
+	// reminders (Odoo activities + scheduled messages via /api/reminders)
+	let remOpen = $state(false);
+	let reminders = $state([]);
+	let remActivities = $state([]);
+	let remAudience = $state([]);
+	let remIsOwner = $state(false);
+	let remUserIds = $state([]);
+	let remWhen = $state('');
+	let remSummary = $state('');
+	let remBusy = $state(false);
+
 	// comments
 	let comments = $state([]);
 	let attachments = $state([]); // flat list, joined by commentId
@@ -99,7 +110,7 @@
 			// md notes saved before x_studio_notes_md existed only have the
 			// sanitizer-mangled html — turndown them back as a best effort
 			src = editorMode === 'md' ? n.x_studio_notes_md || toMarkdown(html) : html;
-			await Promise.all([loadComments(), loadShareData()]);
+			await Promise.all([loadComments(), loadShareData(), loadReminders()]);
 		} catch (e) {
 			error = e.message;
 		}
@@ -147,6 +158,76 @@
 	function toggleGroup(id) {
 		groupIds = groupIds.includes(id) ? groupIds.filter((g) => g !== id) : [...groupIds, id];
 		scheduleSave({ x_studio_group_ids: m2m(groupIds) });
+	}
+
+	/* ── reminders ───────────────────────────────────────────────────── */
+	async function loadReminders() {
+		const res = await fetch(`${base}/api/reminders?noteId=${noteId}`);
+		const d = await res.json();
+		if (!d.ok) return; // panel just stays empty on failure
+		reminders = d.reminders;
+		remActivities = d.activities;
+		remAudience = d.audience;
+		remIsOwner = d.isOwner;
+	}
+
+	// datetime-local min: local "now" in the input's own format
+	const localMin = () =>
+		new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+
+	function toggleRemUser(id) {
+		remUserIds = remUserIds.includes(id)
+			? remUserIds.filter((u) => u !== id)
+			: [...remUserIds, id];
+	}
+
+	// activity state (planned/today/overdue/done) for one assignee of a reminder
+	const actState = (userId, when) =>
+		remActivities.find((a) => a.userId === userId && a.deadline === String(when).slice(0, 10))
+			?.state || '';
+
+	async function addReminder() {
+		if (!remWhen || !remUserIds.length || remBusy) return;
+		remBusy = true;
+		error = '';
+		try {
+			const res = await fetch(`${base}/api/reminders`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					noteId,
+					userIds: remUserIds,
+					when: new Date(remWhen).toISOString(),
+					summary: remSummary.trim()
+				})
+			});
+			const d = await res.json();
+			if (!d.ok) throw new Error(d.error || 'Failed to set reminder');
+			remWhen = '';
+			remSummary = '';
+			remUserIds = [];
+			await loadReminders();
+		} catch (e) {
+			error = e.message;
+		} finally {
+			remBusy = false;
+		}
+	}
+
+	async function cancelReminder(messageId) {
+		error = '';
+		try {
+			const res = await fetch(`${base}/api/reminders`, {
+				method: 'DELETE',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ noteId, messageId })
+			});
+			const d = await res.json();
+			if (!d.ok) throw new Error(d.error || 'Failed to cancel reminder');
+			await loadReminders();
+		} catch (e) {
+			error = e.message;
+		}
 	}
 
 	/* ── comments ────────────────────────────────────────────────────── */
@@ -356,6 +437,9 @@
 		<span class="sync muted">
 			{#if syncState === 'saving'}saving…{:else if syncState === 'saved'}saved ✓{:else if syncState === 'error'}save failed{/if}
 		</span>
+		<button class="btn btn--sm" onclick={() => (remOpen = !remOpen)}>
+			⏰ {reminders.length || ''}
+		</button>
 		{#if isOwner}
 			<button class="btn btn--sm" onclick={() => (shareOpen = !shareOpen)}>
 				Share ({followerIds.length + groupIds.length})
@@ -406,6 +490,62 @@
 					>{g.x_name}</button>
 				{/each}
 			</div>
+		</div>
+	{/if}
+
+	{#if remOpen}
+		<div class="card share-panel fade-in">
+			<div class="label" style="margin-top:0;">New reminder</div>
+			<div class="rem-form">
+				<input class="input" type="datetime-local" min={localMin()} bind:value={remWhen} />
+				<input
+					class="input rem-summary"
+					placeholder="What to remind about (optional)"
+					bind:value={remSummary}
+				/>
+			</div>
+			<div class="label">Remind</div>
+			<div class="picker">
+				{#each remAudience as u (u.id)}
+					<button
+						class="chip {remUserIds.includes(u.id) ? 'chip--accent' : ''}"
+						onclick={() => toggleRemUser(u.id)}
+					>{u.name}</button>
+				{/each}
+			</div>
+			<div class="edit-row">
+				<button
+					class="btn btn--primary btn--sm"
+					disabled={remBusy || !remWhen || !remUserIds.length}
+					onclick={addReminder}
+				>
+					{remBusy ? 'Saving…' : 'Set reminder'}
+				</button>
+			</div>
+
+			{#if reminders.length}
+				<div class="label">Scheduled</div>
+				{#each reminders as r (r.id)}
+					<div class="rem-row">
+						<div class="rem-info">
+							<strong>{fmtWhen(r.when)}</strong>
+							<span class="muted">{r.subject}</span>
+							<div class="picker">
+								{#each r.users as u (u.id)}
+									<span class="chip">
+										{u.name}{actState(u.id, r.when) ? ` · ${actState(u.id, r.when)}` : ''}
+									</span>
+								{/each}
+							</div>
+						</div>
+						{#if r.createdBy === $user?.uid || remIsOwner}
+							<ConfirmButton onconfirm={() => cancelReminder(r.id)} />
+						{/if}
+					</div>
+				{/each}
+			{:else}
+				<p class="muted" style="margin-top:10px;">No reminders yet.</p>
+			{/if}
 		</div>
 	{/if}
 
@@ -652,6 +792,30 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 8px;
+	}
+	.rem-form {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+	}
+	.rem-summary {
+		flex: 1 1 180px;
+		min-width: 0;
+	}
+	.rem-row {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		padding: 10px 0 4px;
+		border-top: 1px solid var(--border);
+		margin-top: 10px;
+	}
+	.rem-info {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
 	}
 	.title-input {
 		width: 100%;
