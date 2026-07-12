@@ -76,7 +76,12 @@
 	let remUserIds = $state([]);
 	let remWhen = $state('');
 	let remSummary = $state('');
+	let remFreq = $state('once');
+	let remCount = $state(30);
+	let remShown = $state(5);
 	let remBusy = $state(false);
+
+	const FREQ_DEFAULT_COUNT = { daily: 30, weekly: 12, monthly: 12 };
 
 	// comments
 	let comments = $state([]);
@@ -179,10 +184,15 @@
 			: [...remUserIds, id];
 	}
 
-	// activity state (planned/today/overdue/done) for one assignee of a reminder
-	const actState = (userId, when) =>
-		remActivities.find((a) => a.userId === userId && a.deadline === String(when).slice(0, 10))
-			?.state || '';
+	// the assignee's pending activity for one occurrence; missing = done (or cancelled)
+	const occActivity = (userId, when) =>
+		remActivities.find((a) => a.userId === userId && a.deadline === String(when).slice(0, 10));
+	const actState = (userId, when) => occActivity(userId, when)?.state || 'done';
+
+	function setFreq(f) {
+		remFreq = f;
+		remCount = FREQ_DEFAULT_COUNT[f] || 1;
+	}
 
 	async function addReminder() {
 		if (!remWhen || !remUserIds.length || remBusy) return;
@@ -196,7 +206,9 @@
 					noteId,
 					userIds: remUserIds,
 					when: new Date(remWhen).toISOString(),
-					summary: remSummary.trim()
+					summary: remSummary.trim(),
+					frequency: remFreq,
+					count: remCount
 				})
 			});
 			const d = await res.json();
@@ -204,6 +216,7 @@
 			remWhen = '';
 			remSummary = '';
 			remUserIds = [];
+			remFreq = 'once';
 			await loadReminders();
 		} catch (e) {
 			error = e.message;
@@ -212,13 +225,29 @@
 		}
 	}
 
-	async function cancelReminder(messageId) {
+	async function markDone(activityId) {
+		error = '';
+		try {
+			const res = await fetch(`${base}/api/reminders`, {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ noteId, activityId })
+			});
+			const d = await res.json();
+			if (!d.ok) throw new Error(d.error || 'Failed to mark done');
+			await loadReminders();
+		} catch (e) {
+			error = e.message;
+		}
+	}
+
+	async function cancelReminder(messageId, series = false) {
 		error = '';
 		try {
 			const res = await fetch(`${base}/api/reminders`, {
 				method: 'DELETE',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ noteId, messageId })
+				body: JSON.stringify({ noteId, messageId, series })
 			});
 			const d = await res.json();
 			if (!d.ok) throw new Error(d.error || 'Failed to cancel reminder');
@@ -502,6 +531,21 @@
 					bind:value={remSummary}
 				/>
 			</div>
+			<div class="rem-form" style="margin-top:8px;">
+				<select class="select" value={remFreq} onchange={(e) => setFreq(e.target.value)}>
+					<option value="once">Once</option>
+					<option value="daily">Daily</option>
+					<option value="weekly">Weekly</option>
+					<option value="monthly">Monthly</option>
+				</select>
+				{#if remFreq !== 'once'}
+					<label class="rem-count muted">
+						repeat
+						<input class="input" type="number" min="1" max="30" bind:value={remCount} />
+						times
+					</label>
+				{/if}
+			</div>
 			<div class="label">Remind</div>
 			<div class="picker">
 				{#each remAudience as u (u.id)}
@@ -522,23 +566,42 @@
 			</div>
 
 			{#if reminders.length}
-				<div class="label">Scheduled</div>
-				{#each reminders as r (r.id)}
+				<div class="label">Scheduled ({reminders.length})</div>
+				{#each reminders.slice(0, remShown) as r (r.id)}
 					<div class="rem-row">
 						<div class="rem-info">
 							<strong>{fmtWhen(r.when)}</strong>
+							{#if r.frequency}<span class="chip chip--green">{r.frequency}</span>{/if}
 							<span class="muted">{r.subject}</span>
 							<div class="picker">
 								{#each r.users as u (u.id)}
-									<span class="chip">
-										{u.name}{actState(u.id, r.when) ? ` · ${actState(u.id, r.when)}` : ''}
-									</span>
+									{#if u.id === $user?.uid && occActivity(u.id, r.when)}
+										<button
+											class="chip"
+											title="Mark done"
+											onclick={() => markDone(occActivity(u.id, r.when).id)}
+										>☐ {u.name} · {actState(u.id, r.when)}</button>
+									{:else}
+										<span class="chip {actState(u.id, r.when) === 'done' ? 'chip--green' : ''}">
+											{actState(u.id, r.when) === 'done' ? '✓' : ''} {u.name} · {actState(u.id, r.when)}
+										</span>
+									{/if}
 								{/each}
 							</div>
 						</div>
-						<ConfirmButton onconfirm={() => cancelReminder(r.id)} />
+						<div class="rem-actions">
+							<ConfirmButton onconfirm={() => cancelReminder(r.id)} label="✕" />
+							{#if r.seriesKey}
+								<ConfirmButton onconfirm={() => cancelReminder(r.id, true)} label="✕ series" confirmLabel="All?" />
+							{/if}
+						</div>
 					</div>
 				{/each}
+				{#if reminders.length > remShown}
+					<button class="btn btn--sm" style="margin-top:8px;" onclick={() => (remShown += 10)}>
+						Show more ({reminders.length - remShown} more)
+					</button>
+				{/if}
 			{:else}
 				<p class="muted" style="margin-top:10px;">No reminders yet.</p>
 			{/if}
@@ -812,6 +875,21 @@
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
+	}
+	.rem-actions {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		align-items: flex-end;
+	}
+	.rem-count {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 0.85rem;
+	}
+	.rem-count input {
+		width: 64px;
 	}
 	.title-input {
 		width: 100%;

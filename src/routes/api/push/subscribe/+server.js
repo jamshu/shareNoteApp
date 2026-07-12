@@ -1,13 +1,16 @@
-// Save/remove a device push subscription. x_push_subscription is written with
-// the admin key only (no user access rights on the model). Upsert keyed by
-// endpoint — endpoints are unique per browser/device subscription.
+// Save/remove a device push subscription. Single source of truth is Odoo's
+// native mail.push.device (partner-keyed), written with the admin key and
+// upserted by endpoint — endpoints are unique per browser/device subscription.
+// Odoo-originated notifications (reminders, chatter) push to the same rows.
 //
-// Web-push subscriptions are ALSO registered in Odoo's native mail.push.device
-// so Odoo-originated notifications (e.g. scheduled reminder messages) reach app
-// browsers. For that to work Odoo must sign pushes with the same VAPID key pair
-// the browser subscribed under, so we claim Odoo's (unset) VAPID config params
-// with the app's keys once. Native APNs/FCM rows (keys.auth 'ios'/'android'/
-// 'fcm') are not web push — Odoo can't deliver those; they stay app-only.
+// Odoo must sign pushes with the same VAPID key pair the browser subscribed
+// under, so we claim Odoo's (unset) VAPID config params with the app's keys
+// once and never overwrite them.
+//
+// Native APNs/FCM rows (keys.auth 'ios'/'android'/'fcm', endpoint = raw token)
+// live here too: Odoo's own web-push attempt on them just logs an error (only
+// 404/410 DeviceUnreachableError unlinks); the app's sendPush routes them to
+// APNs/FCM directly. ponytail: log noise on Odoo's side until Capacitor lands.
 import { json } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import { env as publicEnv } from '$env/dynamic/public';
@@ -15,9 +18,6 @@ import { requireUid } from '$lib/server/auth.js';
 import { adminExecute } from '$lib/server/odoo.js';
 
 export const prerender = false;
-
-const SUB_MODEL = 'x_push_subscription';
-const NATIVE = new Set(['ios', 'android', 'fcm']);
 
 // python's base64.urlsafe_b64decode requires padding; npm web-push keys have none
 const b64pad = (s) => s + '='.repeat((4 - (s.length % 4)) % 4);
@@ -29,38 +29,20 @@ async function claimOdooVapid() {
 	const pub = (publicEnv.PUBLIC_VAPID_PUBLIC_KEY || env.VAPID_PUBLIC_KEY || '').trim();
 	const priv = (env.VAPID_PRIVATE_KEY || '').trim();
 	if (!pub || !priv) return; // keys not configured — retry next call, don't cache
-	{
-		const existing = await adminExecute('ir.config_parameter', 'search', [
-			[['key', 'in', ['mail.web_push_vapid_public_key', 'mail.web_push_vapid_private_key']]]
+	const existing = await adminExecute('ir.config_parameter', 'search', [
+		[['key', 'in', ['mail.web_push_vapid_public_key', 'mail.web_push_vapid_private_key']]]
+	]);
+	// never overwrite — if Odoo already has keys, existing Odoo-side
+	// subscriptions depend on them
+	if (!existing.length) {
+		await adminExecute('ir.config_parameter', 'set_param', [
+			'mail.web_push_vapid_public_key', b64pad(pub)
 		]);
-		// never overwrite — if Odoo already has keys, existing Odoo-side
-		// subscriptions depend on them
-		if (!existing.length) {
-			await adminExecute('ir.config_parameter', 'set_param', [
-				'mail.web_push_vapid_public_key', b64pad(pub)
-			]);
-			await adminExecute('ir.config_parameter', 'set_param', [
-				'mail.web_push_vapid_private_key', b64pad(priv)
-			]);
-		}
+		await adminExecute('ir.config_parameter', 'set_param', [
+			'mail.web_push_vapid_private_key', b64pad(priv)
+		]);
 	}
 	_vapidClaimed = true;
-}
-
-async function upsertOdooDevice(uid, endpoint, keys) {
-	await claimOdooVapid();
-	const [u] = await adminExecute('res.users', 'read', [[uid]], { fields: ['partner_id'] });
-	const partnerId = u?.partner_id?.[0];
-	if (!partnerId) return;
-	const existing = await adminExecute('mail.push.device', 'search', [
-		[['endpoint', '=', endpoint]]
-	]);
-	if (existing.length) await adminExecute('mail.push.device', 'unlink', [existing]);
-	await adminExecute('mail.push.device', 'create', [{
-		partner_id: partnerId,
-		endpoint,
-		keys: JSON.stringify({ p256dh: keys.p256dh, auth: keys.auth })
-	}]);
 }
 
 export async function POST({ request, cookies }) {
@@ -70,25 +52,19 @@ export async function POST({ request, cookies }) {
 		if (!endpoint || !keys?.p256dh || !keys?.auth) {
 			return json({ ok: false, error: 'Invalid subscription data' }, { status: 400 });
 		}
-		const existing = await adminExecute(SUB_MODEL, 'search', [
-			[['x_studio_endpoint', '=', endpoint]]
+		await claimOdooVapid();
+		const [u] = await adminExecute('res.users', 'read', [[uid]], { fields: ['partner_id'] });
+		const partnerId = u?.partner_id?.[0];
+		if (!partnerId) return json({ ok: false, error: 'No partner for user' }, { status: 500 });
+		const existing = await adminExecute('mail.push.device', 'search', [
+			[['endpoint', '=', endpoint]]
 		]);
-		if (existing.length) await adminExecute(SUB_MODEL, 'unlink', [existing]);
-		await adminExecute(SUB_MODEL, 'create', [{
-			x_name: `push u${uid} ${endpoint.slice(-16)}`,
-			x_studio_user_id: uid,
-			x_studio_endpoint: endpoint,
-			x_studio_keys_p256dh: keys.p256dh,
-			x_studio_keys_auth: keys.auth
+		if (existing.length) await adminExecute('mail.push.device', 'unlink', [existing]);
+		await adminExecute('mail.push.device', 'create', [{
+			partner_id: partnerId,
+			endpoint,
+			keys: JSON.stringify({ p256dh: keys.p256dh, auth: keys.auth })
 		}]);
-		if (!NATIVE.has(keys.auth)) {
-			try {
-				await upsertOdooDevice(uid, endpoint, keys);
-			} catch (e) {
-				// app push still works without the Odoo-side registration
-				console.error('[push/subscribe] mail.push.device register failed:', e?.message);
-			}
-		}
 		return json({ ok: true });
 	} catch (e) {
 		console.error('[push/subscribe] POST failed:', e?.message);
@@ -101,18 +77,10 @@ export async function DELETE({ request, cookies }) {
 		await requireUid(cookies);
 		const { endpoint } = (await request.json()) ?? {};
 		if (!endpoint) return json({ ok: false, error: 'endpoint required' }, { status: 400 });
-		const ids = await adminExecute(SUB_MODEL, 'search', [
-			[['x_studio_endpoint', '=', endpoint]]
+		const ids = await adminExecute('mail.push.device', 'search', [
+			[['endpoint', '=', endpoint]]
 		]);
-		if (ids.length) await adminExecute(SUB_MODEL, 'unlink', [ids]);
-		try {
-			const devices = await adminExecute('mail.push.device', 'search', [
-				[['endpoint', '=', endpoint]]
-			]);
-			if (devices.length) await adminExecute('mail.push.device', 'unlink', [devices]);
-		} catch {
-			/* best-effort */
-		}
+		if (ids.length) await adminExecute('mail.push.device', 'unlink', [ids]);
 		return json({ ok: true });
 	} catch (e) {
 		return json({ ok: false, error: e?.message }, { status: e?.status || 500 });

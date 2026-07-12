@@ -5,7 +5,20 @@ import { env } from '$env/dynamic/private';
 import { env as publicEnv } from '$env/dynamic/public';
 import { adminExecute } from './odoo.js';
 
-const SUB_MODEL = 'x_push_subscription';
+// Single source of truth for subscriptions: Odoo's native mail.push.device
+// (partner-keyed; `keys` is a JSON string {p256dh, auth}). Odoo pushes to the
+// same rows for its own notifications.
+const DEVICE_MODEL = 'mail.push.device';
+
+const deviceToSub = (d) => {
+	let keys = {};
+	try {
+		keys = JSON.parse(d.keys || '{}');
+	} catch {
+		/* malformed row — web push will fail and clean it up */
+	}
+	return { endpoint: d.endpoint, keys };
+};
 
 // ─── VAPID ──────────────────────────────────────────────────────────────────
 
@@ -226,8 +239,8 @@ function sendAPNs(deviceToken, payload) {
 
 async function removeStaleSub(endpoint) {
 	try {
-		const ids = await adminExecute(SUB_MODEL, 'search', [[['x_studio_endpoint', '=', endpoint]]]);
-		if (ids.length) await adminExecute(SUB_MODEL, 'unlink', [ids]);
+		const ids = await adminExecute(DEVICE_MODEL, 'search', [[['endpoint', '=', endpoint]]]);
+		if (ids.length) await adminExecute(DEVICE_MODEL, 'unlink', [ids]);
 	} catch {
 		/* best-effort */
 	}
@@ -258,43 +271,26 @@ export async function sendPush(sub, payload) {
 
 /** Send to all devices registered for one user. */
 export async function sendToUser(userId, payload) {
+	const [u] = await adminExecute('res.users', 'read', [[userId]], { fields: ['partner_id'] });
+	const partnerId = u?.partner_id?.[0];
+	if (!partnerId) return;
 	const rows = await adminExecute(
-		SUB_MODEL,
+		DEVICE_MODEL,
 		'search_read',
-		[[['x_studio_user_id', '=', userId]]],
-		{ fields: ['x_studio_endpoint', 'x_studio_keys_p256dh', 'x_studio_keys_auth'] }
+		[[['partner_id', '=', partnerId]]],
+		{ fields: ['endpoint', 'keys'] }
 	);
-	await Promise.allSettled(
-		rows.map((r) =>
-			sendPush(
-				{
-					endpoint: r.x_studio_endpoint,
-					keys: { p256dh: r.x_studio_keys_p256dh, auth: r.x_studio_keys_auth }
-				},
-				payload
-			)
-		)
-	);
+	await Promise.allSettled(rows.map((r) => sendPush(deviceToSub(r), payload)));
 }
 
 /** Broadcast to all subscribed users. Returns subscriber count. */
 export async function sendToAll(payload) {
-	const rows = await adminExecute(SUB_MODEL, 'search_read', [[]], {
-		fields: ['x_studio_user_id', 'x_studio_endpoint', 'x_studio_keys_p256dh', 'x_studio_keys_auth']
+	const rows = await adminExecute(DEVICE_MODEL, 'search_read', [[]], {
+		fields: ['endpoint', 'keys']
 	});
 	console.log(`[push] sendToAll: ${rows.length} subscription(s) found`);
 	if (!rows.length) return 0;
-	const results = await Promise.allSettled(
-		rows.map((r) =>
-			sendPush(
-				{
-					endpoint: r.x_studio_endpoint,
-					keys: { p256dh: r.x_studio_keys_p256dh, auth: r.x_studio_keys_auth }
-				},
-				payload
-			)
-		)
-	);
+	const results = await Promise.allSettled(rows.map((r) => sendPush(deviceToSub(r), payload)));
 	const failed = results.filter((r) => r.status === 'rejected').length;
 	if (failed) console.error(`[push] sendToAll: ${failed}/${rows.length} push(es) failed`);
 	return rows.length;
