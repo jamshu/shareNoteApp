@@ -610,10 +610,10 @@
 			</div>
 
 			{#snippet remRow(r)}
-				<div class="rem-row {doneForMe(r) ? 'rem-row--done' : ''}">
+				<div class="rem-row {doneForMe(r) ? 'rem-row--done' : ''} {r.fired ? 'rem-row--fired' : ''}">
+					{#if r.fired}<span class="sent-ribbon">sent</span>{/if}
 					<div class="rem-info">
 						<strong>{fmtRemWhen(r)}</strong>
-						{#if r.fired}<span class="chip">sent</span>{/if}
 						{#if r.frequency}<span class="chip chip--green">{r.frequency}</span>{/if}
 						<span class="muted">{r.subject}</span>
 						<div class="picker">
@@ -944,6 +944,27 @@
 	}
 	.rem-row--done {
 		opacity: 0.65;
+	}
+	/* fired rows: clip the corner ribbon; padding keeps text from under it */
+	.rem-row--fired {
+		position: relative;
+		overflow: hidden;
+		padding-right: 48px;
+	}
+	.sent-ribbon {
+		position: absolute;
+		top: 12px;
+		right: -30px;
+		transform: rotate(45deg);
+		background: #d64545;
+		color: #fff;
+		font-size: 0.62rem;
+		font-weight: 700;
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+		padding: 3px 32px;
+		pointer-events: none;
+		box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
 	}
 	.rem-info {
 		flex: 1;
