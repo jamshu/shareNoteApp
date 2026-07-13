@@ -108,32 +108,82 @@ export async function GET({ url, cookies }) {
 			: [];
 		const byPartner = Object.fromEntries(users.map((u) => [u.partner_id?.[0], u]));
 
+		// active_test: false — done activities are archived (active=false), not
+		// deleted, so they can be listed under "show done" and un-done later
 		const [messages, activities] = await Promise.all([
 			adminExecute('mail.scheduled.message', 'search_read', [
 				[['model', '=', NOTES()], ['res_id', '=', noteId]]
 			], { fields: ['scheduled_date', 'subject', 'partner_ids', 'send_context'], order: 'scheduled_date asc' }),
 			adminExecute('mail.activity', 'search_read', [
 				[['res_model', '=', NOTES()], ['res_id', '=', noteId]]
-			], { fields: ['user_id', 'date_deadline', 'summary', 'state', 'create_uid'], order: 'date_deadline asc' })
+			], {
+				fields: ['user_id', 'date_deadline', 'summary', 'state', 'create_uid', 'active', 'date_done'],
+				order: 'date_deadline asc',
+				context: { active_test: false }
+			})
 		]);
+
+		const reminders = messages.map((m) => ({
+			id: m.id,
+			when: m.scheduled_date,
+			subject: m.subject,
+			fired: false,
+			frequency: m.send_context?.sharenote_recur?.freq || '',
+			seriesKey: m.send_context?.sharenote_recur?.key || '',
+			// exact activity ids of this occurrence — same-day reminders collide on
+			// dates, so the UI must resolve ticks by id
+			activityIds: m.send_context?.sharenote_act_ids || [],
+			users: m.partner_ids.map((p) => byPartner[p]).filter(Boolean).map((u) => ({ id: u.id, name: u.name }))
+		}));
+
+		// occurrences whose scheduled message already fired (Odoo's cron posts and
+		// deletes it) live on only as activities — synthesize rows for them so a
+		// reminder stays visible until ticked done. Exact time went with the
+		// message; these rows carry the date only.
+		const claimed = new Set(reminders.flatMap((r) => r.activityIds));
+		// messages created before act-id tracking claim their whole date instead
+		const legacyDates = new Set(
+			messages
+				.filter((m) => !m.send_context?.sharenote_act_ids?.length)
+				.map((m) => String(m.scheduled_date).slice(0, 10))
+		);
+		const firedGroups = new Map();
+		for (const x of activities) {
+			if (claimed.has(x.id) || legacyDates.has(x.date_deadline)) continue;
+			const key = `${x.date_deadline}|${x.summary || ''}`;
+			if (!firedGroups.has(key)) {
+				firedGroups.set(key, {
+					id: `fired:${key}`,
+					when: x.date_deadline,
+					subject: x.summary || '',
+					fired: true,
+					frequency: '',
+					seriesKey: '',
+					activityIds: [],
+					users: []
+				});
+			}
+			const g = firedGroups.get(key);
+			g.activityIds.push(x.id);
+			if (x.user_id?.[0] && !g.users.some((u) => u.id === x.user_id[0])) {
+				g.users.push({ id: x.user_id[0], name: x.user_id[1] || '' });
+			}
+		}
+		reminders.push(...firedGroups.values());
+		reminders.sort((a, b) => String(a.when).localeCompare(String(b.when)));
 
 		return json({
 			ok: true,
-			reminders: messages.map((m) => ({
-				id: m.id,
-				when: m.scheduled_date,
-				subject: m.subject,
-				frequency: m.send_context?.sharenote_recur?.freq || '',
-				seriesKey: m.send_context?.sharenote_recur?.key || '',
-				users: m.partner_ids.map((p) => byPartner[p]).filter(Boolean).map((u) => ({ id: u.id, name: u.name }))
-			})),
+			reminders,
 			activities: activities.map((x) => ({
 				id: x.id,
 				userId: x.user_id?.[0] ?? null,
 				userName: x.user_id?.[1] ?? '',
 				deadline: x.date_deadline,
 				summary: x.summary,
-				state: x.state
+				state: x.state,
+				done: !x.active,
+				doneOn: x.date_done || ''
 			})),
 			audience: users.map((u) => ({ id: u.id, name: u.name }))
 		});
@@ -200,17 +250,26 @@ export async function POST({ request, cookies, url }) {
 		const createActivities = async (vals, quiet) => {
 			const context = quiet ? { ...odooCtx, mail_activity_quick_update: true } : odooCtx;
 			try {
-				const { sessionId } = await sessionCallKw(sid, 'mail.activity', 'create', [vals], {
+				const { result, sessionId } = await sessionCallKw(sid, 'mail.activity', 'create', [vals], {
 					context
 				});
 				refreshSessionCookie(cookies, sessionId, sid);
+				return [].concat(result);
 			} catch {
-				await adminExecute('mail.activity', 'create', [vals], { context });
+				return [].concat(await adminExecute('mail.activity', 'create', [vals], { context }));
 			}
 		};
-		await createActivities(activityVals(dates[0]), false);
+		// remember which activity ids belong to each occurrence — dates alone
+		// collide across reminders (two same-day reminders share a deadline), so
+		// done/undo and cancel must resolve activities by id, not by date
+		const actIdsByDate = {};
+		actIdsByDate[dates[0]] = await createActivities(activityVals(dates[0]), false);
 		if (dates.length > 1) {
-			await createActivities(dates.slice(1).flatMap(activityVals), true);
+			const rest = dates.slice(1);
+			const ids = await createActivities(rest.flatMap(activityVals), true);
+			rest.forEach((date, i) => {
+				actIdsByDate[date] = ids.slice(i * targets.length, (i + 1) * targets.length);
+			});
 		}
 
 		// due-date notification: Odoo posts this on the note's chatter at `when`,
@@ -240,8 +299,13 @@ export async function POST({ request, cookies, url }) {
 					message_type: 'comment',
 					email_layout_xmlid: 'mail.mail_notification_light'
 				}),
-				// groups the series so cancel/series and the UI freq chip work
-				send_context: seriesKey ? { sharenote_recur: { key: seriesKey, freq: frequency } } : false
+				// sharenote_recur groups the series so cancel/series and the UI freq
+				// chip work; sharenote_act_ids ties the occurrence to its exact
+				// activities so done/undo/cancel never touch a same-day sibling
+				send_context: {
+					...(seriesKey ? { sharenote_recur: { key: seriesKey, freq: frequency } } : {}),
+					sharenote_act_ids: actIdsByDate[date] || []
+				}
 			}))
 		]);
 
@@ -297,15 +361,26 @@ export async function DELETE({ request, cookies }) {
 			chain = siblings.filter((s) => s.send_context?.sharenote_recur?.key === key);
 		}
 
-		// drop the activities created with these occurrences (note + deadline + assignees)
+		// drop the activities created with these occurrences — by stored ids when
+		// available (same-day reminders share deadlines), date+assignees for
+		// pre-tracking messages. active_test: false — archived (done) activities
+		// must go too, or the cancelled reminder lingers as a done row.
 		for (const m of chain) {
-			if (!m.partner_ids?.length) continue;
-			const acts = await adminExecute('mail.activity', 'search', [[
-				['res_model', '=', NOTES()],
-				['res_id', '=', noteId],
-				['date_deadline', '=', String(m.scheduled_date).slice(0, 10)],
-				['user_id.partner_id', 'in', m.partner_ids]
-			]]);
+			const ids = m.send_context?.sharenote_act_ids;
+			let acts;
+			if (ids?.length) {
+				acts = await adminExecute('mail.activity', 'search', [[['id', 'in', ids]]], {
+					context: { active_test: false }
+				});
+			} else {
+				if (!m.partner_ids?.length) continue;
+				acts = await adminExecute('mail.activity', 'search', [[
+					['res_model', '=', NOTES()],
+					['res_id', '=', noteId],
+					['date_deadline', '=', String(m.scheduled_date).slice(0, 10)],
+					['user_id.partner_id', 'in', m.partner_ids]
+				]], { context: { active_test: false } });
+			}
 			if (acts.length) await adminExecute('mail.activity', 'unlink', [acts]);
 		}
 		await adminExecute('mail.scheduled.message', 'unlink', [chain.map((m) => Number(m.id))]);
@@ -315,21 +390,26 @@ export async function DELETE({ request, cookies }) {
 	}
 }
 
-/** Tick your own reminder done: mail.activity.action_feedback (posts to chatter,
- *  removes the activity). If every assignee of that occurrence is done, the
- *  pending scheduled message is dropped too — nobody needs the due-time ping. */
+/** Tick your own reminder done — or un-done. Done ARCHIVES the mail.activity
+ *  (active=false + date_done, an Odoo 17+ feature) instead of action_feedback,
+ *  which would delete it; un-done just un-archives. If every assignee of that
+ *  occurrence is done, the pending scheduled message is dropped too — nobody
+ *  needs the due-time ping. (Un-done won't recreate a dropped message: the row
+ *  reappears from its activities, but the due-time ping is gone.) */
 export async function PATCH({ request, cookies }) {
 	try {
 		assertConfigured();
-		const { noteId: rawId, activityId, feedback = '' } = (await request.json()) ?? {};
+		const { noteId: rawId, activityId, undone = false } = (await request.json()) ?? {};
 		const noteId = Number(rawId);
 		if (!noteId || !activityId) {
 			return json({ ok: false, error: 'noteId and activityId required' }, { status: 400 });
 		}
-		const { uid, sid, odooCtx } = await assertNoteAccess(cookies, noteId);
+		const { uid } = await assertNoteAccess(cookies, noteId);
 
+		// active_test: false — an archived (done) activity must be readable to un-done it
 		const [act] = await adminExecute('mail.activity', 'read', [[Number(activityId)]], {
-			fields: ['res_model', 'res_id', 'user_id', 'date_deadline']
+			fields: ['res_model', 'res_id', 'user_id', 'date_deadline'],
+			context: { active_test: false }
 		});
 		if (!act || act.res_model !== NOTES() || act.res_id !== noteId) {
 			return json({ ok: false, error: 'Reminder not found' }, { status: 404 });
@@ -338,30 +418,37 @@ export async function PATCH({ request, cookies }) {
 			return json({ ok: false, error: 'You can only mark your own reminder done' }, { status: 403 });
 		}
 
-		const kwargs = feedback.trim() ? { feedback: feedback.trim() } : {};
-		try {
-			const { sessionId } = await sessionCallKw(
-				sid, 'mail.activity', 'action_feedback', [[Number(activityId)]],
-				{ ...kwargs, context: odooCtx }
-			);
-			refreshSessionCookie(cookies, sessionId, sid);
-		} catch {
-			await adminExecute('mail.activity', 'action_feedback', [[Number(activityId)]], kwargs);
-		}
+		await adminExecute('mail.activity', 'write', [
+			[Number(activityId)],
+			undone
+				? { active: true, date_done: false }
+				: { active: false, date_done: new Date().toISOString().slice(0, 10) }
+		]);
+		if (undone) return json({ ok: true });
 
-		// occurrence fully done? drop its pending scheduled message
+		// occurrence fully done? drop its pending scheduled message. Resolve the
+		// occurrence by its stored activity ids (dates collide across same-day
+		// reminders); date+partner matching only for pre-tracking messages.
 		try {
 			const msgs = await adminExecute('mail.scheduled.message', 'search_read', [
 				[['model', '=', NOTES()], ['res_id', '=', noteId]]
-			], { fields: ['scheduled_date', 'partner_ids'] });
+			], { fields: ['scheduled_date', 'partner_ids', 'send_context'] });
 			for (const m of msgs) {
-				if (String(m.scheduled_date).slice(0, 10) !== act.date_deadline) continue;
-				const remaining = await adminExecute('mail.activity', 'search_count', [[
-					['res_model', '=', NOTES()],
-					['res_id', '=', noteId],
-					['date_deadline', '=', act.date_deadline],
-					['user_id.partner_id', 'in', m.partner_ids]
-				]]);
+				const ids = m.send_context?.sharenote_act_ids;
+				let remaining;
+				if (ids?.length) {
+					if (!ids.includes(Number(activityId))) continue;
+					// default context: archived (done) activities don't count
+					remaining = await adminExecute('mail.activity', 'search_count', [[['id', 'in', ids]]]);
+				} else {
+					if (String(m.scheduled_date).slice(0, 10) !== act.date_deadline) continue;
+					remaining = await adminExecute('mail.activity', 'search_count', [[
+						['res_model', '=', NOTES()],
+						['res_id', '=', noteId],
+						['date_deadline', '=', act.date_deadline],
+						['user_id.partner_id', 'in', m.partner_ids]
+					]]);
+				}
 				if (!remaining) await adminExecute('mail.scheduled.message', 'unlink', [[m.id]]);
 			}
 		} catch (e) {

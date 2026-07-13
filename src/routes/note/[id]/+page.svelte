@@ -80,6 +80,7 @@
 	let remCount = $state(30);
 	let remShown = $state(5);
 	let remBusy = $state(false);
+	let showDone = $state(false);
 
 	const FREQ_DEFAULT_COUNT = { daily: 30, weekly: 12, monthly: 12 };
 
@@ -184,10 +185,27 @@
 			: [...remUserIds, id];
 	}
 
-	// the assignee's pending activity for one occurrence; missing = done (or cancelled)
-	const occActivity = (userId, when) =>
-		remActivities.find((a) => a.userId === userId && a.deadline === String(when).slice(0, 10));
-	const actState = (userId, when) => occActivity(userId, when)?.state || 'done';
+	// the assignee's activity for one occurrence (done ones are archived, not
+	// deleted, so they still resolve here); missing = done (legacy/cancelled).
+	// Resolve by the row's own activity ids — same-day reminders share deadline
+	// dates, so date matching would tie one tick to every reminder that day.
+	// Date fallback only for reminders created before act-id tracking.
+	const occActivity = (userId, r) =>
+		r.activityIds?.length
+			? remActivities.find((a) => a.userId === userId && r.activityIds.includes(a.id))
+			: remActivities.find((a) => a.userId === userId && a.deadline === String(r.when).slice(0, 10));
+	const actState = (userId, r) => {
+		const a = occActivity(userId, r);
+		return !a || a.done ? 'done' : a.state;
+	};
+	// your own tick hides the reminder for you; non-assignees keep seeing it
+	// until every assignee is done
+	const doneForMe = (r) =>
+		r.users.some((u) => u.id === $user?.uid)
+			? actState($user?.uid, r) === 'done'
+			: r.users.length > 0 && r.users.every((u) => actState(u.id, r) === 'done');
+	let remPending = $derived(reminders.filter((r) => !doneForMe(r)));
+	let remDone = $derived(reminders.filter((r) => doneForMe(r)));
 
 	function setFreq(f) {
 		remFreq = f;
@@ -225,13 +243,13 @@
 		}
 	}
 
-	async function markDone(activityId) {
+	async function markDone(activityId, undone = false) {
 		error = '';
 		try {
 			const res = await fetch(`${base}/api/reminders`, {
 				method: 'PATCH',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ noteId, activityId })
+				body: JSON.stringify({ noteId, activityId, undone })
 			});
 			const d = await res.json();
 			if (!d.ok) throw new Error(d.error || 'Failed to mark done');
@@ -372,7 +390,33 @@
 	}
 
 	const fmtWhen = (d) => (d ? new Date(d + 'Z').toLocaleString() : '');
+	// fired reminders only carry a date (the exact time went with the consumed
+	// scheduled message) — format it as-is, no timezone shift
+	const fmtRemWhen = (r) =>
+		r.fired
+			? new Date(r.when + 'T00:00:00Z').toLocaleDateString(undefined, { timeZone: 'UTC' })
+			: fmtWhen(r.when);
 	const commentAtts = (cid) => attachments.filter((a) => a.commentId === cid);
+
+	// comments are editable/deletable only briefly, so histories stay honest;
+	// the server enforces the same window
+	const COMMENT_EDIT_WINDOW_MS = 5 * 60 * 1000;
+	let now = $state(Date.now());
+	$effect(() => {
+		const t = setInterval(() => (now = Date.now()), 1000);
+		return () => clearInterval(t);
+	});
+	// 'T' instead of the raw space — Safari won't parse "YYYY-MM-DD HH:MM:SSZ"
+	const commentTs = (c) => new Date(String(c.create_date).replace(' ', 'T') + 'Z').getTime();
+	const canModify = (c) =>
+		c.create_uid?.[0] === $user?.uid && now - commentTs(c) < COMMENT_EDIT_WINDOW_MS;
+	// m:ss left to edit/delete, shown as a live countdown next to the buttons
+	const editCountdown = (c) => {
+		const left = COMMENT_EDIT_WINDOW_MS - (now - commentTs(c));
+		if (left <= 0) return '';
+		const s = Math.ceil(left / 1000);
+		return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+	};
 
 	/* ── markdown toolbar ────────────────────────────────────────────── */
 	// wrap: surrounds the selection; prefix: prepends each selected line
@@ -465,7 +509,7 @@
 			{#if syncState === 'saving'}saving…{:else if syncState === 'saved'}saved ✓{:else if syncState === 'error'}save failed{/if}
 		</span>
 		<button class="btn btn--sm" onclick={() => (remOpen = !remOpen)}>
-			⏰ {reminders.length || ''}
+			⏰ {remPending.length || ''}
 		</button>
 		{#if isOwner}
 			<button class="btn btn--sm" onclick={() => (shareOpen = !shareOpen)}>
@@ -565,45 +609,70 @@
 				</button>
 			</div>
 
-			{#if reminders.length}
-				<div class="label">Scheduled ({reminders.length})</div>
-				{#each reminders.slice(0, remShown) as r (r.id)}
-					<div class="rem-row">
-						<div class="rem-info">
-							<strong>{fmtWhen(r.when)}</strong>
-							{#if r.frequency}<span class="chip chip--green">{r.frequency}</span>{/if}
-							<span class="muted">{r.subject}</span>
-							<div class="picker">
-								{#each r.users as u (u.id)}
-									{#if u.id === $user?.uid && occActivity(u.id, r.when)}
-										<button
-											class="chip"
-											title="Mark done"
-											onclick={() => markDone(occActivity(u.id, r.when).id)}
-										>☐ {u.name} · {actState(u.id, r.when)}</button>
-									{:else}
-										<span class="chip {actState(u.id, r.when) === 'done' ? 'chip--green' : ''}">
-											{actState(u.id, r.when) === 'done' ? '✓' : ''} {u.name} · {actState(u.id, r.when)}
-										</span>
-									{/if}
-								{/each}
-							</div>
+			{#snippet remRow(r)}
+				<div class="rem-row {doneForMe(r) ? 'rem-row--done' : ''}">
+					<div class="rem-info">
+						<strong>{fmtRemWhen(r)}</strong>
+						{#if r.fired}<span class="chip">sent</span>{/if}
+						{#if r.frequency}<span class="chip chip--green">{r.frequency}</span>{/if}
+						<span class="muted">{r.subject}</span>
+						<div class="picker">
+							{#each r.users as u (u.id)}
+								{@const a = occActivity(u.id, r)}
+								{#if u.id === $user?.uid && a && !a.done}
+									<button
+										class="chip"
+										title="Mark done"
+										onclick={() => markDone(a.id)}
+									>☐ {u.name} · {a.state}</button>
+								{:else if u.id === $user?.uid && a && a.done}
+									<button
+										class="chip chip--green"
+										title="Mark not done — the reminder becomes visible again"
+										onclick={() => markDone(a.id, true)}
+									>✓ {u.name} · undo</button>
+								{:else}
+									<span class="chip {actState(u.id, r) === 'done' ? 'chip--green' : ''}">
+										{actState(u.id, r) === 'done' ? '✓' : ''} {u.name} · {actState(u.id, r)}
+									</span>
+								{/if}
+							{/each}
 						</div>
+					</div>
+					{#if !r.fired}
 						<div class="rem-actions">
 							<ConfirmButton onconfirm={() => cancelReminder(r.id)} label="✕" />
 							{#if r.seriesKey}
 								<ConfirmButton onconfirm={() => cancelReminder(r.id, true)} label="✕ series" confirmLabel="All?" />
 							{/if}
 						</div>
-					</div>
+					{/if}
+				</div>
+			{/snippet}
+
+			{#if remPending.length}
+				<div class="label">Scheduled ({remPending.length})</div>
+				{#each remPending.slice(0, remShown) as r (r.id)}
+					{@render remRow(r)}
 				{/each}
-				{#if reminders.length > remShown}
+				{#if remPending.length > remShown}
 					<button class="btn btn--sm" style="margin-top:8px;" onclick={() => (remShown += 10)}>
-						Show more ({reminders.length - remShown} more)
+						Show more ({remPending.length - remShown} more)
 					</button>
 				{/if}
 			{:else}
 				<p class="muted" style="margin-top:10px;">No reminders yet.</p>
+			{/if}
+
+			{#if remDone.length}
+				<button class="btn btn--sm btn--ghost" style="margin-top:10px;" onclick={() => (showDone = !showDone)}>
+					{showDone ? 'Hide done' : `Show done (${remDone.length})`}
+				</button>
+				{#if showDone}
+					{#each remDone as r (r.id)}
+						{@render remRow(r)}
+					{/each}
+				{/if}
 			{/if}
 		</div>
 	{/if}
@@ -698,13 +767,17 @@
 			<div class="comment-head">
 				<strong>{c.create_uid?.[1]}</strong>
 				<span class="muted">{fmtWhen(c.create_date)}</span>
-				{#if c.create_uid?.[0] === $user?.uid}
+				<!-- edit/delete close after 5 minutes; keep Cancel reachable mid-edit -->
+				{#if canModify(c) || editingId === c.id}
 					<div class="comment-actions">
 						{#if editingId === c.id}
 							<button class="btn btn--sm btn--ghost" onclick={() => (editingId = null)}>
 								Cancel
 							</button>
 						{:else}
+							<span class="muted comment-timer" title="Time left to edit or delete">
+								⏳ {editCountdown(c)}
+							</span>
 							<button class="btn btn--sm btn--ghost" onclick={() => startEdit(c)}>Edit</button>
 							<ConfirmButton onconfirm={() => deleteComment(c.id)} />
 						{/if}
@@ -868,6 +941,9 @@
 		padding: 10px 0 4px;
 		border-top: 1px solid var(--border);
 		margin-top: 10px;
+	}
+	.rem-row--done {
+		opacity: 0.65;
 	}
 	.rem-info {
 		flex: 1;
@@ -1069,6 +1145,12 @@
 		display: flex;
 		gap: 6px;
 		margin-left: auto;
+		align-items: center;
+	}
+	.comment-timer {
+		font-size: 0.8rem;
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
 	}
 	.edit-row {
 		display: flex;

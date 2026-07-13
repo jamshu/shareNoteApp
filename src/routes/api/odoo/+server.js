@@ -20,6 +20,11 @@ const MODELS = () => ({
 
 const stripHtml = (s) => String(s || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 
+// comments are mutable only briefly after posting — history must stay honest
+const COMMENT_EDIT_WINDOW_MS = 5 * 60 * 1000;
+// Odoo datetimes are naive UTC "YYYY-MM-DD HH:MM:SS"
+const odooTs = (d) => Date.parse(String(d).replace(' ', 'T') + 'Z');
+
 /** Followers a note resolves to right now (direct + via groups) — for share diffing. */
 async function currentFollowerSet(model, noteId) {
 	const [note] = await adminExecute(model, 'read', [[noteId]], {
@@ -112,11 +117,19 @@ export async function POST({ request, cookies }) {
 				const { id, values } = data;
 
 				// comments may only be edited by their author (record rules alone
-				// don't guarantee this, so enforce it here)
+				// don't guarantee this, so enforce it here), and only briefly
 				if (modelKey === 'comments') {
-					const [rec] = await call(MODEL, 'read', [[Number(id)]], { fields: ['create_uid'] });
+					const [rec] = await call(MODEL, 'read', [[Number(id)]], {
+						fields: ['create_uid', 'create_date']
+					});
 					if (rec?.create_uid?.[0] !== uid) {
 						return json({ success: false, error: 'Not your comment' }, { status: 403 });
+					}
+					if (Date.now() - odooTs(rec.create_date) > COMMENT_EDIT_WINDOW_MS) {
+						return json(
+							{ success: false, error: 'Comments can only be edited within 5 minutes of posting' },
+							{ status: 403 }
+						);
 					}
 					if (values.x_studio_body) {
 						values.x_name = stripHtml(values.x_studio_body).slice(0, 60) || 'Comment';
@@ -150,7 +163,9 @@ export async function POST({ request, cookies }) {
 				const { id } = data;
 				// only the author may delete a comment, only the owner may delete a note
 				if (modelKey === 'comments' || modelKey === 'notes') {
-					const [rec] = await call(MODEL, 'read', [[Number(id)]], { fields: ['create_uid'] });
+					const [rec] = await call(MODEL, 'read', [[Number(id)]], {
+						fields: ['create_uid', 'create_date']
+					});
 					if (rec?.create_uid?.[0] !== uid) {
 						return json(
 							{
@@ -158,6 +173,15 @@ export async function POST({ request, cookies }) {
 								error:
 									modelKey === 'comments' ? 'Not your comment' : 'Only the owner can delete a note'
 							},
+							{ status: 403 }
+						);
+					}
+					if (
+						modelKey === 'comments' &&
+						Date.now() - odooTs(rec.create_date) > COMMENT_EDIT_WINDOW_MS
+					) {
+						return json(
+							{ success: false, error: 'Comments can only be deleted within 5 minutes of posting' },
 							{ status: 403 }
 						);
 					}
