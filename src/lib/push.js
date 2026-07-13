@@ -38,6 +38,15 @@ export async function subscribePush() {
 	if (!pushSupported()) throw new Error('Push not supported in this browser');
 	if (!VAPID_PUBLIC_KEY) throw new Error('VAPID public key not configured');
 	// Chrome only shows the prompt from a user gesture — call this off a click.
+	// An origin the user blocked (or dismissed a few times — Chrome then
+	// auto-embargoes it) resolves 'denied' with NO prompt; only the user can
+	// unblock it from the browser's site settings.
+	if (Notification.permission === 'denied') {
+		throw new Error(
+			'Notifications are blocked for this site. Click the lock icon in the ' +
+				'address bar → Site settings → allow Notifications, then try again.'
+		);
+	}
 	const perm = await Notification.requestPermission();
 	if (perm !== 'granted') throw new Error(`Notification permission: ${perm}`);
 	const reg = await swReady();
